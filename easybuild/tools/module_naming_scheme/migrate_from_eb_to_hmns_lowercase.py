@@ -23,18 +23,15 @@
 # along with EasyBuild.  If not, see <http://www.gnu.org/licenses/>.
 ##
 """
-EasyBuild support for foss compiler toolchain (includes GCC, OpenMPI, OpenBLAS, LAPACK, ScaLAPACK and FFTW).
+Implementation of a module naming scheme that can be used to migrate from EasyBuildMNS to HierarchicalMNS.
 
 :author: Kenneth Hoste (Ghent University)
 """
+from easybuild.tools.module_naming_scheme.easybuild_lowercase_mns import EasyBuildLowercaseMNS
+from easybuild.tools.module_naming_scheme.hierarchical_lowercase_mns import HierarchicalLowercaseMNS
 
-from easybuild.toolchains.gompi import Gompi
-from easybuild.toolchains.fft.fftw import Fftw
-from easybuild.toolchains.linalg.openblas import OpenBLAS
-from easybuild.toolchains.linalg.scalapack import ScaLAPACK
+class MigrateFromEBToHMNSLowercase(HierarchicalLowercaseMNS, EasyBuildLowercaseMNS):
 
-class Gnu(Gompi, OpenBLAS, ScaLAPACK, Fftw):
-    """Compiler toolchain with GCC, OpenMPI, OpenBLAS, ScaLAPACK and FFTW."""
-    NAME = 'gnu'
-    SUBTOOLCHAIN = Gompi.NAME
-
+    def det_install_subdir(self, ec):
+        """Determine name of software installation subdirectory of install path, using EasyBuild MNS."""
+        return EasyBuildLowercaseMNS.det_full_module_name(self, ec)
