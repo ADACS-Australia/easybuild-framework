@@ -2353,12 +2353,13 @@ class EasyBlock(object):
         try:
             # Start by removing write access from others
             perms = stat.S_IWOTH
-            adjust_permissions(self.installdir, perms, add=False, recursive=True, group_id=self.group[1],
+            adjust_permissions(self.installdir, perms, add=False, recursive=True,
                                relative=True, ignore_errors=True)
 
             # Next make sure owner and group write is set, and read for owner, group, and other
             perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
-            adjust_permissions(self.installdir, perms, add=True, recursive=True, relative=True, ignore_errors=True)
+            adjust_permissions(self.installdir, perms, add=True, recursive=True, relative=True, ignore_errors=True,
+                               group_id=self.group[1])
             self.log.info("Successfully set permissions to rw?rw?r-? for path: " + self.installdir)
 
         except EasyBuildError, err:
@@ -2369,12 +2370,12 @@ class EasyBlock(object):
             try:
                 # Start by removing write access from others
                 perms = stat.S_IWOTH
-                adjust_permissions(path, perms, add=False, recursive=True, group_id=self.group[1],
-                                   relative=True, ignore_errors=True)
+                adjust_permissions(path, perms, add=False, recursive=True, relative=True, ignore_errors=True)
 
                 # Next make sure owner and group write is set, and read for owner, group, and other
                 perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
-                adjust_permissions(path, perms, add=True, recursive=True, relative=True, ignore_errors=True)
+                adjust_permissions(path, perms, add=True, recursive=True, relative=True, ignore_errors=True,
+                                   group_id=self.group[1])
                 self.log.info("Successfully set permissions to rw?rw?r-? for path: " + path)
 
             except EasyBuildError, err:
