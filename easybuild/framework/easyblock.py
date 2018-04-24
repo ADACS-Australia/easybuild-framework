@@ -2557,8 +2557,8 @@ class EasyBlock(object):
             (SANITYCHECK_STEP, 'sanity checking', [lambda x: x.sanity_check_step], False),
             (CLEANUP_STEP, 'cleaning up', [lambda x: x.cleanup_step], False),
             (MODULE_STEP, 'creating module', [lambda x: x.make_module_step], False),
-            (PERMISSIONS_STEP, 'permissions', [lambda x: x.permissions_step], False),
             (PACKAGE_STEP, 'packaging', [lambda x: x.package_step], False),
+            (PERMISSIONS_STEP, 'permissions', [lambda x: x.permissions_step], False),
         ]
 
         # full list of steps, included iterated steps
