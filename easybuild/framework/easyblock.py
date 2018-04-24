@@ -4124,9 +4124,6 @@ def build_and_install_one(ecdict, init_env):
     end_timestamp = datetime.now()
 
     if result:
-        # Fix permissions
-        print("Running permissions step after moving logs, permission errors will only be printed to the stdout.")
-        app.permissions_step()
         success = True
         summary = 'COMPLETED'
         succ = 'successfully'
@@ -4169,9 +4166,7 @@ def build_and_install_one(ecdict, init_env):
         logs = glob.glob('%s*' % application_log)
         print_msg("Results of the build can be found in the log file(s) %s" % ', '.join(logs), log=_log, silent=silent)
 
-    del app
-
-    return (success, application_log, errormsg)
+    return (success, application_log, errormsg, app)
 
 
 def copy_easyblocks_for_reprod(easyblock_instances, reprod_dir):
