@@ -978,7 +978,7 @@ def convert_name(name, upper=False):
 
 
 def adjust_permissions(name, permissionBits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
-                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=True):
+                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=False):
     """
     Add or remove (if add is False) permissionBits from all files (if onlydirs is False)
     and directories (if onlyfiles is False) in path
@@ -1016,19 +1016,20 @@ def adjust_permissions(name, permissionBits, add=True, onlyfiles=False, onlydirs
     for path in allpaths:
 
         try:
+            perms = os.stat(path)[stat.ST_MODE]
             if relative:
-
                 # relative permissions (add or remove)
-                perms = os.stat(path)[stat.ST_MODE]
-
                 if add:
-                    os.chmod(path, perms | permissionBits)
+                    if perms | permissionBits != perms:
+                        os.chmod(path, perms | permissionBits)
                 else:
-                    os.chmod(path, perms & ~permissionBits)
+                    if perms & ~permissionBits != perms:
+                        os.chmod(path, perms & ~permissionBits)
 
             else:
-                # hard permissions bits (not relative)
-                os.chmod(path, permissionBits)
+                if permissionBits != perms:
+                    # hard permissions bits (not relative)
+                    os.chmod(path, permissionBits)
 
             if group_id:
                 # only change the group id if it the current gid is different from what we want
