@@ -1705,8 +1705,8 @@ def convert_name(name, upper=False):
         return name
 
 
-def adjust_permissions(provided_path, permission_bits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
-                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=None):
+def adjust_permissions(name, permissionBits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
+                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=False):
     """
     Change permissions for specified path, using specified permission bits
 
@@ -1753,36 +1753,20 @@ def adjust_permissions(provided_path, permission_bits, add=True, onlyfiles=False
     err_msg = None
     for path in allpaths:
         try:
-            # don't change permissions if path is a symlink, since we're not checking where the symlink points to
-            # this is done because of security concerns (symlink may point out of installation directory)
-            # (note: os.lchmod is not supported on Linux)
-            if os.path.islink(path):
-                _log.debug("Not changing permissions for %s, since it's a symlink", path)
+            perms = os.stat(path)[stat.ST_MODE]
+            if relative:
+                # relative permissions (add or remove)
+                if add:
+                    if perms | permissionBits != perms:
+                        os.chmod(path, perms | permissionBits)
+                else:
+                    if perms & ~permissionBits != perms:
+                        os.chmod(path, perms & ~permissionBits)
+
             else:
-                # determine current permissions
-                current_perms = os.lstat(path)[stat.ST_MODE]
-                _log.debug("Current permissions for %s: %s", path, oct(current_perms))
-
-                if relative:
-                    # relative permissions (add or remove)
-                    if add:
-                        _log.debug("Adding permissions for %s: %s", path, oct(permission_bits))
-                        new_perms = current_perms | permission_bits
-                    else:
-                        _log.debug("Removing permissions for %s: %s", path, oct(permission_bits))
-                        new_perms = current_perms & ~permission_bits
-                else:
+                if permissionBits != perms:
                     # hard permissions bits (not relative)
-                    new_perms = permission_bits
-                    _log.debug("Hard setting permissions for %s: %s", path, oct(new_perms))
-
-                # only actually do chmod if current permissions are not correct already
-                # (this is important because chmod requires that files are owned by current user)
-                if new_perms == current_perms:
-                    _log.debug("Current permissions for %s are already OK: %s", path, oct(current_perms))
-                else:
-                    _log.debug("Changing permissions for %s to %s", path, oct(new_perms))
-                    os.chmod(path, new_perms)
+                    os.chmod(path, permissionBits)
 
             if group_id:
                 # only change the group id if it the current gid is different from what we want
