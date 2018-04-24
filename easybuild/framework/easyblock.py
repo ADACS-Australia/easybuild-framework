@@ -2760,9 +2760,6 @@ def build_and_install_one(ecdict, init_env, hooks=None):
             adjust_permissions(new_log_dir, stat.S_IWUSR, add=False, recursive=False)
 
     if result:
-        # Fix permissions
-        print("Running permissions step after moving logs, permission errors will only be printed to the stdout.")
-        app.permissions_step()
         success = True
         summary = 'COMPLETED'
         succ = 'successfully'
@@ -2805,9 +2802,7 @@ def build_and_install_one(ecdict, init_env, hooks=None):
         logs = glob.glob('%s*' % application_log)
         print_msg("Results of the build can be found in the log file(s) %s" % ', '.join(logs), log=_log, silent=silent)
 
-    del app
-
-    return (success, application_log, errormsg)
+    return (success, application_log, errormsg, app)
 
 
 def get_easyblock_instance(ecdict):
