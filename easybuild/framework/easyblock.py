@@ -41,6 +41,7 @@ The EasyBlock class should serve as a base class for all easyblocks.
 
 import copy
 import glob
+import grp
 import inspect
 import os
 import re
@@ -67,8 +68,8 @@ from easybuild.tools import config, run
 from easybuild.tools.build_details import get_build_stats
 from easybuild.tools.build_log import EasyBuildError, dry_run_msg, dry_run_warning, dry_run_set_dirs
 from easybuild.tools.build_log import print_error, print_msg, print_warning
-from easybuild.tools.config import DEFAULT_ENVVAR_USERS_MODULES
-from easybuild.tools.config import FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_PATCHES, FORCE_DOWNLOAD_SOURCES
+from easybuild.tools.config import FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_PATCHES, FORCE_DOWNLOAD_SOURCES, \
+    ConfigurationVariables
 from easybuild.tools.config import build_option, build_path, get_log_filename, get_repository, get_repositorypath
 from easybuild.tools.config import install_path, log_path, package_path, source_paths
 from easybuild.tools.environment import restore_env, sanitize_env
@@ -250,21 +251,14 @@ class EasyBlock(object):
         # initialize logger
         self._init_log()
 
-        # try and use the specified group (if any)
-        group_name = build_option('group')
-        group_spec = self.cfg['group']
-        if group_spec is not None:
-            if isinstance(group_spec, tuple):
-                if len(group_spec) == 2:
-                    group_spec = group_spec[0]
-                else:
-                    raise EasyBuildError("Found group spec in tuple format that is not a 2-tuple: %s", str(group_spec))
-            self.log.warning("Group spec '%s' is overriding config group '%s'." % (group_spec, group_name))
-            group_name = group_spec
+        # force the group to be set to "apps" for ozstar
+        group_name = "apps"
+        try:
+            group_id = grp.getgrnam(group_name).gr_gid
+        except KeyError, err:
+            raise EasyBuildError("Failed to get group ID for '%s', group does not exist (err: %s)", group_name, err)
 
-        self.group = None
-        if group_name is not None:
-            self.group = use_group(group_name)
+        self.group = (group_name, group_id)
 
         # generate build/install directories
         self.gen_builddir()
@@ -3568,61 +3562,35 @@ class EasyBlock(object):
         Finalize installation procedure: adjust permissions as configured, change group ownership (if requested).
         Installing user must be member of the group that it is changed to.
         """
-        if self.group is not None:
-            # remove permissions for others, and set group ID
-            try:
-                perms = stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
-                adjust_permissions(self.installdir, perms, add=False, recursive=True, group_id=self.group[1],
-                                   relative=True, ignore_errors=True)
-            except EasyBuildError as err:
-                raise EasyBuildError("Unable to change group permissions of file(s): %s", err)
-            self.log.info("Successfully made software only available for group %s (gid %s)" % self.group)
+        # First set the group owner to apps and set relevant permissions
+        try:
+            # Start by removing write access from others
+            perms = stat.S_IWOTH
+            adjust_permissions(self.installdir, perms, add=False, recursive=True, group_id=self.group[1],
+                               relative=True, ignore_errors=True)
 
-        if build_option('read_only_installdir'):
-            # remove write permissions for everyone
-            perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
-            adjust_permissions(self.installdir, perms, add=False, recursive=True, relative=True, ignore_errors=True)
-            self.log.info("Successfully removed write permissions recursively for *EVERYONE* on install dir.")
-
-        elif build_option('group_writable_installdir'):
-            # enable write permissions for group
-            perms = stat.S_IWGRP
+            # Next make sure owner and group write is set, and read for owner, group, and other
+            perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
             adjust_permissions(self.installdir, perms, add=True, recursive=True, relative=True, ignore_errors=True)
-            self.log.info("Successfully enabled write permissions recursively for group on install dir.")
+            self.log.info("Successfully set permissions to rw?rw?r-? for path: " + self.installdir)
 
-        else:
-            # remove write permissions for group and other
-            perms = stat.S_IWGRP | stat.S_IWOTH
-            adjust_permissions(self.installdir, perms, add=False, recursive=True, relative=True, ignore_errors=True)
-            self.log.info("Successfully removed write permissions recursively for group/other on install dir.")
+        except EasyBuildError, err:
+            raise EasyBuildError("Unable to change group permissions of file(s): %s", err)
 
-        # add read permissions for everybody on all files, taking into account group (if any)
-        perms = stat.S_IRUSR | stat.S_IRGRP
-        # directory permissions: readable (r) & searchable (x)
-        dir_perms = stat.S_IXUSR | stat.S_IXGRP
-        self.log.debug("Ensuring read permissions for user/group on install dir (recursively)")
+        # Next set permissions for any extra locations specified in the easybuild configuration
+        for path in ConfigurationVariables()['extra_permission_paths']:
+            try:
+                # Start by removing write access from others
+                perms = stat.S_IWOTH
+                adjust_permissions(path, perms, add=False, recursive=True, group_id=self.group[1],
+                                   relative=True, ignore_errors=True)
+                # Next make sure owner and group write is set, and read for owner, group, and other
+                perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+                adjust_permissions(path, perms, add=True, recursive=True, relative=True, ignore_errors=True)
+                self.log.info("Successfully set permissions to rw?rw?r-? for path: " + path)
 
-        if self.group is None:
-            perms |= stat.S_IROTH
-            dir_perms |= stat.S_IXOTH
-            self.log.debug("Also ensuring read permissions for others on install dir (no group specified)")
-
-        umask = build_option('umask')
-        if umask is not None:
-            # umask is specified as a string, so interpret it first as integer in octal, then take complement (~)
-            perms &= ~int(umask, 8)
-            dir_perms &= ~int(umask, 8)
-            self.log.debug("Taking umask '%s' into account when ensuring read permissions to install dir", umask)
-
-        self.log.debug("Adding file read permissions in %s using '%s'", self.installdir, oct(perms))
-        adjust_permissions(self.installdir, perms, add=True, recursive=True, relative=True, ignore_errors=True)
-
-        # also ensure directories have exec permissions (so they can be opened)
-        self.log.debug("Adding directory search permissions in %s using '%s'", self.installdir, oct(dir_perms))
-        adjust_permissions(self.installdir, dir_perms, add=True, recursive=True, relative=True, onlydirs=True,
-                           ignore_errors=True)
-
-        self.log.info("Successfully added read permissions recursively on install dir %s", self.installdir)
+            except EasyBuildError, err:
+                raise EasyBuildError("Unable to change group permissions of file(s): %s", err)
 
     def test_cases_step(self):
         """
