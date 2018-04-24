@@ -978,7 +978,7 @@ def convert_name(name, upper=False):
 
 
 def adjust_permissions(name, permissionBits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
-                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=False):
+                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=False, stdout=False):
     """
     Add or remove (if add is False) permissionBits from all files (if onlydirs is False)
     and directories (if onlyfiles is False) in path
@@ -1043,7 +1043,10 @@ def adjust_permissions(name, permissionBits, add=True, onlyfiles=False, onlydirs
         except OSError, err:
             if ignore_errors:
                 # ignore errors while adjusting permissions (for example caused by bad links)
-                _log.info("Failed to chmod/chown %s (but ignoring it): %s" % (path, err))
+                if stdout:
+                    print("Failed to chmod/chown %s (but ignoring it): %s" % (path, err))
+                else:
+                    _log.info("Failed to chmod/chown %s (but ignoring it): %s" % (path, err))
                 fail_cnt += 1
             else:
                 failed_paths.append(path)
