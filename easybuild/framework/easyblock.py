@@ -3567,13 +3567,13 @@ class EasyBlock(object):
             # Start by removing write access from others
             perms = stat.S_IWOTH
             adjust_permissions(self.installdir, perms, add=False, recursive=True,
-                               relative=True, ignore_errors=True)
+                               relative=True, ignore_errors=True, stdout=True)
 
             # Next make sure owner and group write is set, and read for owner, group, and other
             perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
             adjust_permissions(self.installdir, perms, add=True, recursive=True, relative=True, ignore_errors=True,
-                               group_id=self.group[1])
-            self.log.info("Successfully set permissions to rw?rw?r-? for path: " + self.installdir)
+                               group_id=self.group[1], stdout=True)
+            print("Successfully set permissions to rw?rw?r-? for path: " + self.installdir)
 
         except EasyBuildError, err:
             raise EasyBuildError("Unable to change group permissions of file(s): %s", err)
@@ -3583,13 +3583,14 @@ class EasyBlock(object):
             try:
                 # Start by removing write access from others
                 perms = stat.S_IWOTH
-                adjust_permissions(path, perms, add=False, recursive=True, relative=True, ignore_errors=True)
+                adjust_permissions(path, perms, add=False, recursive=True, relative=True, ignore_errors=True,
+                                   stdout=True)
 
                 # Next make sure owner and group write is set, and read for owner, group, and other
                 perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
                 adjust_permissions(path, perms, add=True, recursive=True, relative=True, ignore_errors=True,
-                                   group_id=self.group[1])
-                self.log.info("Successfully set permissions to rw?rw?r-? for path: " + path)
+                                   group_id=self.group[1], stdout=True)
+                print("Successfully set permissions to rw?rw?r-? for path: " + path)
 
             except EasyBuildError, err:
                 raise EasyBuildError("Unable to change group permissions of file(s): %s", err)
@@ -3800,7 +3801,7 @@ class EasyBlock(object):
             (CLEANUP_STEP, 'cleaning up', [lambda x: x.cleanup_step], False),
             (MODULE_STEP, 'creating module', [lambda x: x.make_module_step], False),
             (PACKAGE_STEP, 'packaging', [lambda x: x.package_step], False),
-            (PERMISSIONS_STEP, 'permissions', [lambda x: x.permissions_step], False),
+            #(PERMISSIONS_STEP, 'permissions', [lambda x: x.permissions_step], False),
         ]
 
         # full list of steps, included iterated steps
@@ -4123,6 +4124,9 @@ def build_and_install_one(ecdict, init_env):
     end_timestamp = datetime.now()
 
     if result:
+        # Fix permissions
+        print("Running permissions step after moving logs, permission errors will only be printed to the stdout.")
+        app.permissions_step()
         success = True
         summary = 'COMPLETED'
         succ = 'successfully'
