@@ -1194,17 +1194,17 @@ class EasyBlock(object):
         """
         Create the necessary group check.
         """
-        group_error_msg = None
-        ec_group = self.cfg['group']
-        if ec_group is not None and isinstance(ec_group, tuple):
-            group_error_msg = ec_group[1]
+        # group_error_msg = None
+        # ec_group = self.cfg['group']
+        # if ec_group is not None and isinstance(ec_group, tuple):
+        #     group_error_msg = ec_group[1]
+        #
+        # if self.group is not None:
+        #     txt = self.module_generator.check_group(self.group[0], error_msg=group_error_msg)
+        # else:
+        #     txt = ''
 
-        if self.group is not None:
-            txt = self.module_generator.check_group(self.group[0], error_msg=group_error_msg)
-        else:
-            txt = ''
-
-        return txt
+        return ''
 
     def make_module_req(self):
         """
