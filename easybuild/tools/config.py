@@ -105,6 +105,9 @@ FORCE_DOWNLOAD_SOURCES = 'sources'
 FORCE_DOWNLOAD_CHOICES = [FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_PATCHES, FORCE_DOWNLOAD_SOURCES]
 DEFAULT_FORCE_DOWNLOAD = FORCE_DOWNLOAD_SOURCES
 
+DOCKER_BASE_IMAGE_UBUNTU = 'ubuntu:16.04'
+DOCKER_BASE_IMAGE_CENTOS = 'centos:7'
+
 
 # utility function for obtaining default paths
 def mk_full_default_path(name, prefix=DEFAULT_PREFIX):
@@ -185,6 +188,7 @@ BUILD_OPTIONS_CMDLINE = {
         'hidden',
         'ignore_checksums',
         'install_latest_eb_release',
+        'lib64_fallback_sanity_check',
         'logtostdout',
         'minimal_toolchains',
         'module_only',
