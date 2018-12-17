@@ -142,6 +142,7 @@ BUILD_OPTIONS_CMDLINE = {
         'github_user',
         'github_org',
         'group',
+        'hooks',
         'ignore_dirs',
         'job_backend_config',
         'job_cores',
@@ -216,6 +217,7 @@ BUILD_OPTIONS_CMDLINE = {
         'cleanup_tmpdir',
         'extended_dry_run_ignore_errors',
         'mpi_tests',
+        'modules_tool_version_check',
     ],
     WARN: [
         'check_ebroot_env_vars',
