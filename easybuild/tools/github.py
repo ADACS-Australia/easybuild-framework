@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2018 Ghent University
+# Copyright 2012-2019 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -30,22 +30,20 @@ Utility module for working with github
 :author: Toon Willems (Ghent University)
 """
 import base64
+import copy
 import getpass
 import glob
 import os
 import random
 import re
 import socket
-import string
 import sys
 import tempfile
 import time
-import urllib2
 from datetime import datetime, timedelta
 from distutils.version import LooseVersion
-from vsc.utils import fancylogger
-from vsc.utils.missing import nub
 
+from easybuild.base import fancylogger
 from easybuild.framework.easyconfig.easyconfig import EASYCONFIGS_ARCHIVE_DIR
 from easybuild.framework.easyconfig.easyconfig import copy_easyconfigs, copy_patch_files, process_easyconfig
 from easybuild.framework.easyconfig.parser import EasyConfigParser
@@ -53,8 +51,9 @@ from easybuild.tools.build_log import EasyBuildError, print_msg, print_warning
 from easybuild.tools.config import build_option
 from easybuild.tools.filetools import apply_patch, copy_dir, det_patched_files, download_file, extract_file
 from easybuild.tools.filetools import mkdir, read_file, symlink, which, write_file
+from easybuild.tools.py2vs3 import HTTPError, URLError, ascii_letters, urlopen
 from easybuild.tools.systemtools import UNKNOWN, get_tool_version
-from easybuild.tools.utilities import only_if_module_is_available
+from easybuild.tools.utilities import nub, only_if_module_is_available
 
 
 _log = fancylogger.getLogger('github', fname=False)
@@ -63,15 +62,15 @@ _log = fancylogger.getLogger('github', fname=False)
 try:
     import keyring
     HAVE_KEYRING = True
-except ImportError, err:
+except ImportError as err:
     _log.warning("Failed to import 'keyring' Python module: %s" % err)
     HAVE_KEYRING = False
 
 try:
-    from vsc.utils.rest import RestClient
+    from easybuild.base.rest import RestClient
     HAVE_GITHUB_API = True
-except ImportError, err:
-    _log.warning("Failed to import from 'vsc.utils.rest' Python module: %s" % err)
+except ImportError as err:
+    _log.warning("Failed to import from 'easybuild.base.rest' Python module: %s" % err)
     HAVE_GITHUB_API = False
 
 try:
@@ -86,6 +85,7 @@ GITHUB_API_URL = 'https://api.github.com'
 GITHUB_DIR_TYPE = u'dir'
 GITHUB_EB_MAIN = 'easybuilders'
 GITHUB_EASYCONFIGS_REPO = 'easybuild-easyconfigs'
+GITHUB_DEVELOP_BRANCH = 'develop'
 GITHUB_FILE_TYPE = u'file'
 GITHUB_PR_STATE_OPEN = 'open'
 GITHUB_PR_STATES = [GITHUB_PR_STATE_OPEN, 'closed', 'all']
@@ -100,6 +100,7 @@ GITHUB_RAW = 'https://raw.githubusercontent.com'
 GITHUB_STATE_CLOSED = 'closed'
 HTTP_STATUS_OK = 200
 HTTP_STATUS_CREATED = 201
+HTTP_STATUS_NO_CONTENT = 204
 KEYRING_GITHUB_TOKEN = 'github_token'
 URL_SEPARATOR = '/'
 
@@ -107,6 +108,7 @@ VALID_CLOSE_PR_REASONS = {
     'archived': 'uses an archived toolchain',
     'inactive': 'no activity for > 6 months',
     'obsolete': 'obsoleted by more recent PRs',
+    'retest': 'closing and reopening to trigger tests',
 }
 
 
@@ -156,7 +158,7 @@ class Githubfs(object):
         else:
             try:
                 return githubobj['type'] == GITHUB_DIR_TYPE
-            except:
+            except Exception:
                 return False
 
     @staticmethod
@@ -164,7 +166,7 @@ class Githubfs(object):
         """Check if this path points to a file"""
         try:
             return githubobj['type'] == GITHUB_FILE_TYPE
-        except:
+        except Exception:
             return False
 
     def listdir(self, path):
@@ -244,7 +246,7 @@ def github_api_get_request(request_f, github_user=None, token=None, **kwargs):
 
     try:
         status, data = url.get(**kwargs)
-    except socket.gaierror, err:
+    except socket.gaierror as err:
         _log.warning("Error occurred while performing get request: %s", err)
         status, data = 0, None
 
@@ -270,7 +272,7 @@ def github_api_put_request(request_f, github_user=None, token=None, **kwargs):
 
     try:
         status, data = url.put(**kwargs)
-    except socket.gaierror, err:
+    except socket.gaierror as err:
         _log.warning("Error occurred while performing put request: %s", err)
         status, data = 0, {'message': err}
 
@@ -458,11 +460,13 @@ def fetch_easyconfigs_from_pr(pr, path=None, github_user=None):
     return ec_files
 
 
-def create_gist(txt, fn, descr=None, github_user=None):
+def create_gist(txt, fn, descr=None, github_user=None, github_token=None):
     """Create a gist with the provided text."""
     if descr is None:
         descr = "(none)"
-    github_token = fetch_github_token(github_user)
+
+    if github_token is None:
+        github_token = fetch_github_token(github_user)
 
     body = {
         "description": descr,
@@ -476,10 +480,23 @@ def create_gist(txt, fn, descr=None, github_user=None):
     g = RestClient(GITHUB_API_URL, username=github_user, token=github_token)
     status, data = g.gists.post(body=body)
 
-    if not status == HTTP_STATUS_CREATED:
+    if status != HTTP_STATUS_CREATED:
         raise EasyBuildError("Failed to create gist; status %s, data: %s", status, data)
 
     return data['html_url']
+
+
+def delete_gist(gist_id, github_user=None, github_token=None):
+    """Delete gist with specified ID."""
+
+    if github_token is None:
+        github_token = fetch_github_token(github_user)
+
+    gh = RestClient(GITHUB_API_URL, username=github_user, token=github_token)
+    status, data = gh.gists[gist_id].delete()
+
+    if status != HTTP_STATUS_NO_CONTENT:
+        raise EasyBuildError("Failed to delete gist with ID %s: status %s, data: %s", status, data)
 
 
 def post_comment_in_issue(issue, txt, account=GITHUB_EB_MAIN, repo=GITHUB_EASYCONFIGS_REPO, github_user=None):
@@ -487,7 +504,7 @@ def post_comment_in_issue(issue, txt, account=GITHUB_EB_MAIN, repo=GITHUB_EASYCO
     if not isinstance(issue, int):
         try:
             issue = int(issue)
-        except ValueError, err:
+        except ValueError as err:
             raise EasyBuildError("Failed to parse specified pull request number '%s' as an int: %s; ", issue, err)
 
     dry_run = build_option('dry_run') or build_option('extended_dry_run')
@@ -518,17 +535,22 @@ def init_repo(path, repo_name, silent=False):
     """
     repo_path = os.path.join(path, repo_name)
 
-    # copy or init git working directory
+    if not os.path.exists(repo_path):
+        mkdir(repo_path, parents=True)
+
+    # clone repo in git_working_dirs_path to repo_path
     git_working_dirs_path = build_option('git_working_dirs_path')
     if git_working_dirs_path:
         workdir = os.path.join(git_working_dirs_path, repo_name)
         if os.path.exists(workdir):
-            print_msg("copying %s..." % workdir, silent=silent)
-            copy_dir(workdir, repo_path)
+            print_msg("cloning git repo from %s..." % workdir, silent=silent)
+            try:
+                workrepo = git.Repo(workdir)
+                workrepo.clone(repo_path)
+            except GitCommandError as err:
+                raise EasyBuildError("Failed to clone git repo at %s: %s", workdir, err)
 
-    if not os.path.exists(repo_path):
-        mkdir(repo_path, parents=True)
-
+    # initalize repo in repo_path
     try:
         repo = git.Repo.init(repo_path)
     except GitCommandError as err:
@@ -552,7 +574,7 @@ def setup_repo_from(git_repo, github_url, target_account, branch_name, silent=Fa
     _log.debug("Cloning from %s", github_url)
 
     # salt to use for names of remotes/branches that are created
-    salt = ''.join(random.choice(string.letters) for _ in range(5))
+    salt = ''.join(random.choice(ascii_letters) for _ in range(5))
 
     remote_name = 'pr_target_account_%s_%s' % (target_account, salt)
 
@@ -653,7 +675,7 @@ def _easyconfigs_pr_common(paths, ecs, start_branch=None, pr_branch=None, start_
     if paths['easyconfigs']:
         for path in paths['easyconfigs']:
             if not os.path.exists(path):
-                    non_existing_paths.append(path)
+                non_existing_paths.append(path)
             else:
                 ec_paths.append(path)
 
@@ -709,7 +731,7 @@ def _easyconfigs_pr_common(paths, ecs, start_branch=None, pr_branch=None, start_
 
     # figure out to which software name patches relate, and copy them to the right place
     if paths['patch_files']:
-        patch_specs = det_patch_specs(paths['patch_files'], file_info)
+        patch_specs = det_patch_specs(paths['patch_files'], file_info, [target_dir])
 
         print_msg("copying patch files to %s..." % target_dir)
         patch_info = copy_patch_files(patch_specs, target_dir)
@@ -751,9 +773,9 @@ def _easyconfigs_pr_common(paths, ecs, start_branch=None, pr_branch=None, start_
     # checkout target branch
     if pr_branch is None:
         if ec_paths:
-            label = file_info['ecs'][0].name + string.translate(file_info['ecs'][0].version, None, '-.')
+            label = file_info['ecs'][0].name + re.sub('[.-]', '', file_info['ecs'][0].version)
         else:
-            label = ''.join(random.choice(string.letters) for _ in range(10))
+            label = ''.join(random.choice(ascii_letters) for _ in range(10))
         pr_branch = '%s_new_pr_%s' % (time.strftime("%Y%m%d%H%M%S"), label)
 
     # create branch to commit to and push;
@@ -787,41 +809,87 @@ def _easyconfigs_pr_common(paths, ecs, start_branch=None, pr_branch=None, start_
     # commit
     git_repo.index.commit(commit_msg)
 
+    push_branch_to_github(git_repo, target_account, pr_target_repo, pr_branch)
+
+    return file_info, deleted_paths, git_repo, pr_branch, diff_stat
+
+
+def create_remote(git_repo, account, repo, https=False):
+    """
+    Create remote in specified git working directory for specified account & repository.
+
+    :param git_repo: git.Repo instance to use (after init_repo & setup_repo)
+    :param account: GitHub account name
+    :param repo: repository name
+    :param https: use https:// URL rather than git@
+    """
+
+    if https:
+        github_url = 'https://github.com/%s/%s.git' % (account, repo)
+    else:
+        github_url = 'git@github.com:%s/%s.git' % (account, repo)
+
+    salt = ''.join(random.choice(ascii_letters) for _ in range(5))
+    remote_name = 'github_%s_%s' % (account, salt)
+
+    try:
+        remote = git_repo.create_remote(remote_name, github_url)
+    except GitCommandError as err:
+        raise EasyBuildError("Failed to create remote %s for %s: %s", remote_name, github_url, err)
+
+    return remote
+
+
+def push_branch_to_github(git_repo, target_account, target_repo, branch):
+    """
+    Push specified branch to GitHub from specified git repository.
+
+    :param git_repo: git.Repo instance to use (after init_repo & setup_repo)
+    :param target_account: GitHub account name
+    :param target_repo: repository name
+    :param branch: name of branch to push
+    """
+
     # push to GitHub
-    github_url = 'git@github.com:%s/%s.git' % (target_account, pr_target_repo)
-    salt = ''.join(random.choice(string.letters) for _ in range(5))
-    remote_name = 'github_%s_%s' % (target_account, salt)
+    remote = create_remote(git_repo, target_account, target_repo)
 
     dry_run = build_option('dry_run') or build_option('extended_dry_run')
 
-    push_branch_msg = "pushing branch '%s' to remote '%s' (%s)" % (pr_branch, remote_name, github_url)
+    github_url = 'git@github.com:%s/%s.git' % (target_account, target_repo)
+
+    push_branch_msg = "pushing branch '%s' to remote '%s' (%s)" % (branch, remote.name, github_url)
     if dry_run:
         print_msg(push_branch_msg + ' [DRY RUN]', log=_log)
     else:
         print_msg(push_branch_msg, log=_log)
         try:
-            my_remote = git_repo.create_remote(remote_name, github_url)
-            res = my_remote.push(pr_branch)
+            res = remote.push(branch)
         except GitCommandError as err:
-            raise EasyBuildError("Failed to push branch '%s' to GitHub (%s): %s", pr_branch, github_url, err)
+            raise EasyBuildError("Failed to push branch '%s' to GitHub (%s): %s", branch, github_url, err)
 
         if res:
             if res[0].ERROR & res[0].flags:
                 raise EasyBuildError("Pushing branch '%s' to remote %s (%s) failed: %s",
-                                     pr_branch, my_remote, github_url, res[0].summary)
+                                     branch, remote, github_url, res[0].summary)
             else:
-                _log.debug("Pushed branch %s to remote %s (%s): %s", pr_branch, my_remote, github_url, res[0].summary)
+                _log.debug("Pushed branch %s to remote %s (%s): %s", branch, remote, github_url, res[0].summary)
         else:
             raise EasyBuildError("Pushing branch '%s' to remote %s (%s) failed: empty result",
-                                 pr_branch, my_remote, github_url)
-
-    return file_info, deleted_paths, git_repo, pr_branch, diff_stat
+                                 branch, remote, github_url)
 
 
 def is_patch_for(patch_name, ec):
     """Check whether specified patch matches any patch in the provided EasyConfig instance."""
     res = False
-    for patch in ec['patches']:
+
+    patches = copy.copy(ec['patches'])
+
+    for ext in ec['exts_list']:
+        if isinstance(ext, (list, tuple)) and len(ext) == 3 and isinstance(ext[2], dict):
+            ext_options = ext[2]
+            patches.extend(ext_options.get('patches', []))
+
+    for patch in patches:
         if isinstance(patch, (tuple, list)):
             patch = patch[0]
         if patch == patch_name:
@@ -831,7 +899,7 @@ def is_patch_for(patch_name, ec):
     return res
 
 
-def det_patch_specs(patch_paths, file_info):
+def det_patch_specs(patch_paths, file_info, ec_dirs):
     """ Determine software names for patch files """
     print_msg("determining software names for patch files...")
     patch_specs = []
@@ -849,9 +917,9 @@ def det_patch_specs(patch_paths, file_info):
             patch_specs.append((patch_path, soft_name))
         else:
             # fall back on scanning all eb files for patches
-            print "Matching easyconfig for %s not found on the first try:" % patch_path,
-            print "scanning all easyconfigs to determine where patch file belongs (this may take a while)..."
-            soft_name = find_software_name_for_patch(patch_file)
+            print("Matching easyconfig for %s not found on the first try:" % patch_path)
+            print("scanning all easyconfigs to determine where patch file belongs (this may take a while)...")
+            soft_name = find_software_name_for_patch(patch_file, ec_dirs)
             if soft_name:
                 patch_specs.append((patch_path, soft_name))
             else:
@@ -861,22 +929,22 @@ def det_patch_specs(patch_paths, file_info):
     return patch_specs
 
 
-def find_software_name_for_patch(patch_name):
+def find_software_name_for_patch(patch_name, ec_dirs):
     """
     Scan all easyconfigs in the robot path(s) to determine which software a patch file belongs to
 
     :param patch_name: name of the patch file
+    :param ecs_dirs: list of directories to consider when looking for easyconfigs
     :return: name of the software that this patch file belongs to (if found)
     """
 
-    robot_paths = build_option('robot_path')
     soft_name = None
 
     all_ecs = []
-    for robot_path in robot_paths:
-        for (dirpath, _, filenames) in os.walk(robot_path):
+    for ec_dir in ec_dirs:
+        for (dirpath, _, filenames) in os.walk(ec_dir):
             for fn in filenames:
-                if fn != 'TEMPLATE.eb':
+                if fn != 'TEMPLATE.eb' and not fn.endswith('.py'):
                     path = os.path.join(dirpath, fn)
                     rawtxt = read_file(path)
                     if 'patches' in rawtxt:
@@ -952,6 +1020,7 @@ def check_pr_eligible_to_merge(pr_data):
                 elif 'FAILED' in comment:
                     res = not_eligible(msg_tmpl % 'FAILED')
                     test_report_found = True
+                    break
                 else:
                     print_warning("Failed to determine outcome of test report for comment:\n%s" % comment)
 
@@ -1058,7 +1127,7 @@ def reasons_for_closing(pr_data):
     return possible_reasons
 
 
-def close_pr(pr, motivation_msg):
+def close_pr(pr, motivation_msg=None):
     """
     Close specified pull request
 
@@ -1085,6 +1154,8 @@ def close_pr(pr, motivation_msg):
 
     dry_run = build_option('dry_run') or build_option('extended_dry_run')
 
+    reopen = motivation_msg == VALID_CLOSE_PR_REASONS['retest']
+
     if not motivation_msg:
         print_msg("No reason or message specified, looking for possible reasons\n")
         possible_reasons = reasons_for_closing(pr_data)
@@ -1096,15 +1167,18 @@ def close_pr(pr, motivation_msg):
             motivation_msg = ", ".join([VALID_CLOSE_PR_REASONS[reason] for reason in possible_reasons])
             print_msg("\nNo reason specified but found possible reasons: %s.\n" % motivation_msg, prefix=False)
 
-    msg = "@%s, this PR is being closed for the following reason(s): %s.\n" % (pr_data['user']['login'], motivation_msg)
-    msg += "Please don't hesitate to reopen this PR or add a comment if you feel this contribution is still relevant.\n"
-    msg += "For more information on our policy w.r.t. closing PRs, see "
-    msg += "https://easybuild.readthedocs.io/en/latest/Contributing.html"
-    msg += "#why-a-pull-request-may-be-closed-by-a-maintainer"
+    msg = "@%s, this PR is being closed for the following reason(s): %s." % (pr_data['user']['login'], motivation_msg)
+    if not reopen:
+        msg += "\nPlease don't hesitate to reopen this PR or add a comment if you feel this contribution is still "
+        msg += "relevant.\nFor more information on our policy w.r.t. closing PRs, see "
+        msg += "https://easybuild.readthedocs.io/en/latest/Contributing.html"
+        msg += "#why-a-pull-request-may-be-closed-by-a-maintainer"
     post_comment_in_issue(pr, msg, account=pr_target_account, repo=pr_target_repo, github_user=github_user)
 
     if dry_run:
-        print_msg("[DRY RUN] Closed %s/%s pull request #%s" % (pr_target_account, pr_target_repo, pr), prefix=False)
+        print_msg("[DRY RUN] Closed %s/%s PR #%s" % (pr_target_account, pr_target_repo, pr), prefix=False)
+        if reopen:
+            print_msg("[DRY RUN] Reopened %s/%s PR #%s" % (pr_target_account, pr_target_repo, pr), prefix=False)
     else:
         github_token = fetch_github_token(github_user)
         if github_token is None:
@@ -1115,6 +1189,11 @@ def close_pr(pr, motivation_msg):
         status, data = pull_url.post(body=body)
         if not status == HTTP_STATUS_OK:
             raise EasyBuildError("Failed to close PR #%s; status %s, data: %s", pr, status, data)
+        if reopen:
+            body = {'state': 'open'}
+            status, data = pull_url.post(body=body)
+            if not status == HTTP_STATUS_OK:
+                raise EasyBuildError("Failed to reopen PR #%s; status %s, data: %s", pr, status, data)
 
 
 def list_prs(params, per_page=GITHUB_MAX_PER_PAGE, github_user=None):
@@ -1250,6 +1329,21 @@ def new_pr(paths, ecs, title=None, descr=None, commit_msg=None):
                 main_title = ', '.join(names_and_versions[:3] + ['...'])
 
             title = "{%s}[%s] %s" % (class_label, toolchain_label, main_title)
+
+            # if Python is listed as a dependency, then mention Python version(s) in PR title
+            pyver = []
+            for ec in file_info['ecs']:
+                # iterate over all dependencies (incl. build dependencies & multi-deps)
+                for dep in ec.dependencies():
+                    if dep['name'] == 'Python':
+                        # check whether Python is listed as a multi-dep if it's marked as a build dependency
+                        if dep['build_only'] and 'Python' not in ec['multi_deps']:
+                            continue
+                        else:
+                            pyver.append(dep['version'])
+            if pyver:
+                title += " w/ Python %s" % ' + '.join(sorted(nub(pyver)))
+
         else:
             raise EasyBuildError("Don't know how to make a PR title for this PR. "
                                  "Please include a title (use --pr-title)")
@@ -1300,23 +1394,43 @@ def new_pr(paths, ecs, title=None, descr=None, commit_msg=None):
                 status, data = pr_url.labels.post(body=labels)
                 if status == HTTP_STATUS_OK:
                     print_msg("Added labels %s to PR#%s" % (', '.join(labels), pr), log=_log, prefix=False)
-            except urllib2.HTTPError as err:
+            except HTTPError as err:
                 _log.info("Failed to add labels to PR# %s: %s." % (pr, err))
 
 
+def det_account_branch_for_pr(pr_id, github_user=None):
+    """Determine account & branch corresponding to pull request with specified id."""
+
+    if github_user is None:
+        github_user = build_option('github_user')
+
+    if github_user is None:
+        raise EasyBuildError("GitHub username (--github-user) must be specified!")
+
+    pr_target_account = build_option('pr_target_account')
+    pr_target_repo = build_option('pr_target_repo')
+
+    pr_data, _ = fetch_pr_data(pr_id, pr_target_account, pr_target_repo, github_user)
+
+    # branch that corresponds with PR is supplied in form <account>:<branch_label>
+    account = pr_data['head']['label'].split(':')[0]
+    branch = ':'.join(pr_data['head']['label'].split(':')[1:])
+    github_target = '%s/%s' % (pr_target_account, pr_target_repo)
+    print_msg("Determined branch name corresponding to %s PR #%s: %s" % (github_target, pr_id, branch), log=_log)
+
+    return account, branch
+
+
 @only_if_module_is_available('git', pkgname='GitPython')
-def update_pr(pr, paths, ecs, commit_msg=None):
+def update_pr(pr_id, paths, ecs, commit_msg=None):
     """
     Update specified pull request using specified files
 
-    :param pr: ID of pull request to update
+    :param pr_id: ID of pull request to update
     :param paths: paths to categorized lists of files (easyconfigs, files to delete, patches)
     :param ecs: list of parsed easyconfigs, incl. for dependencies (if robot is enabled)
     :param commit_msg: commit message to use
     """
-    github_user = build_option('github_user')
-    if github_user is None:
-        raise EasyBuildError("GitHub user must be specified to use --update-pr")
 
     if commit_msg is None:
         raise EasyBuildError("A meaningful commit message must be specified via --pr-commit-msg when using --update-pr")
@@ -1324,13 +1438,7 @@ def update_pr(pr, paths, ecs, commit_msg=None):
     pr_target_account = build_option('pr_target_account')
     pr_target_repo = build_option('pr_target_repo')
 
-    pr_data, _ = fetch_pr_data(pr, pr_target_account, pr_target_repo, github_user)
-
-    # branch that corresponds with PR is supplied in form <account>:<branch_label>
-    account = pr_data['head']['label'].split(':')[0]
-    branch = ':'.join(pr_data['head']['label'].split(':')[1:])
-    github_target = '%s/%s' % (pr_target_account, pr_target_repo)
-    print_msg("Determined branch name corresponding to %s PR #%s: %s" % (github_target, pr, branch), log=_log)
+    account, branch = det_account_branch_for_pr(pr_id)
 
     _, _, _, _, diff_stat = _easyconfigs_pr_common(paths, ecs, start_branch=branch, pr_branch=branch,
                                                    start_account=account, commit_msg=commit_msg)
@@ -1338,7 +1446,7 @@ def update_pr(pr, paths, ecs, commit_msg=None):
     print_msg("Overview of changes:\n%s\n" % diff_stat, log=_log, prefix=False)
 
     full_repo = '%s/%s' % (pr_target_account, pr_target_repo)
-    msg = "Updated %s PR #%s by pushing to branch %s/%s" % (full_repo, pr, account, branch)
+    msg = "Updated %s PR #%s by pushing to branch %s/%s" % (full_repo, pr_id, account, branch)
     if build_option('dry_run') or build_option('extended_dry_run'):
         msg += " [DRY RUN]"
     print_msg(msg, log=_log, prefix=False)
@@ -1364,9 +1472,9 @@ def check_github():
     # check whether we're online; if not, half of the checks are going to fail...
     try:
         print_msg("Making sure we're online...", log=_log, prefix=False, newline=False)
-        urllib2.urlopen(GITHUB_URL, timeout=5)
+        urlopen(GITHUB_URL, timeout=5)
         print_msg("OK\n", log=_log, prefix=False)
-    except urllib2.URLError as err:
+    except URLError as err:
         print_msg("FAIL")
         raise EasyBuildError("checking status of GitHub integration must be done online")
 
@@ -1444,7 +1552,7 @@ def check_github():
     print_msg(msg, log=_log, prefix=False, newline=False)
     git_working_dir = tempfile.mkdtemp(prefix='git-working-dir')
     git_repo, res, push_err = None, None, None
-    branch_name = 'test_branch_%s' % ''.join(random.choice(string.letters) for _ in range(5))
+    branch_name = 'test_branch_%s' % ''.join(random.choice(ascii_letters) for _ in range(5))
     try:
         git_repo = init_repo(git_working_dir, GITHUB_EASYCONFIGS_REPO, silent=True)
         remote_name = setup_repo(git_repo, github_account, GITHUB_EASYCONFIGS_REPO, 'master',
@@ -1488,16 +1596,22 @@ def check_github():
 
     # test creating a gist
     print_msg("* creating gists...", log=_log, prefix=False, newline=False)
-    res = None
+    gist_url = None
     try:
-        res = create_gist("This is just a test", 'test.txt', descr='test123', github_user=github_user)
-    except Exception as err:
-        _log.warning("Exception occurred when trying to create gist: %s", err)
+        gist_url = create_gist("This is just a test", 'test.txt', descr='test123', github_user=github_user,
+                               github_token=github_token)
+        gist_id = gist_url.split('/')[-1]
+        _log.info("Gist with ID %s successfully created, now deleting it again...", gist_id)
 
-    if res and re.match('https://gist.github.com/[0-9a-f]+$', res):
+        delete_gist(gist_id, github_user=github_user, github_token=github_token)
+        _log.info("Gist with ID %s deleted!", gist_id)
+    except Exception as err:
+        _log.warning("Exception occurred when trying to create & delete gist: %s", err)
+
+    if gist_url and re.match('https://gist.github.com/[0-9a-f]+$', gist_url):
         check_res = "OK"
     else:
-        check_res = "FAIL (res: %s)" % res
+        check_res = "FAIL (gist_url: %s)" % gist_url
         status['--upload-test-report'] = False
 
     print_msg(check_res, log=_log, prefix=False)
@@ -1716,3 +1830,47 @@ def fetch_pr_data(pr, pr_target_account, pr_target_repo, github_user, full=False
         pr_data['reviews'] = reviews_data
 
     return pr_data, pr_url
+
+
+def sync_pr_with_develop(pr_id):
+    """Sync pull request with specified ID with current develop branch."""
+    github_user = build_option('github_user')
+    if github_user is None:
+        raise EasyBuildError("GitHub user must be specified to use --sync-pr-with-develop")
+
+    target_account = build_option('pr_target_account')
+    target_repo = build_option('pr_target_repo')
+
+    pr_account, pr_branch = det_account_branch_for_pr(pr_id)
+
+    # initialize repository
+    git_working_dir = tempfile.mkdtemp(prefix='git-working-dir')
+    git_repo = init_repo(git_working_dir, target_repo)
+
+    setup_repo(git_repo, pr_account, target_repo, pr_branch)
+
+    # pull in latest version of 'develop' branch from central repository
+    msg = "pulling latest version of '%s' branch from %s/%s..." % (target_account, target_repo, GITHUB_DEVELOP_BRANCH)
+    print_msg(msg, log=_log)
+    easybuilders_remote = create_remote(git_repo, target_account, target_repo, https=True)
+    pull_out = git_repo.git.pull(easybuilders_remote.name, GITHUB_DEVELOP_BRANCH)
+    _log.debug("Output of 'git pull %s %s': %s", easybuilders_remote.name, GITHUB_DEVELOP_BRANCH, pull_out)
+
+    # create 'develop' branch (with force if one already exists),
+    # and check it out to check git log
+    git_repo.create_head(GITHUB_DEVELOP_BRANCH, force=True).checkout()
+    git_log_develop = git_repo.git.log('-n 3')
+    _log.debug("Top of 'git log' for %s branch:\n%s", GITHUB_DEVELOP_BRANCH, git_log_develop)
+
+    # checkout PR branch, and merge develop branch in it (which will create a merge commit)
+    print_msg("merging '%s' branch into PR branch '%s'..." % (GITHUB_DEVELOP_BRANCH, pr_branch), log=_log)
+    git_repo.git.checkout(pr_branch)
+    merge_out = git_repo.git.merge(GITHUB_DEVELOP_BRANCH)
+    _log.debug("Output of 'git merge %s':\n%s", GITHUB_DEVELOP_BRANCH, merge_out)
+
+    # check git log, should show merge commit on top
+    post_merge_log = git_repo.git.log('-n 3')
+    _log.debug("Top of 'git log' after 'git merge %s':\n%s", GITHUB_DEVELOP_BRANCH, post_merge_log)
+
+    # push updated branch back to GitHub (unless we're doing a dry run)
+    return push_branch_to_github(git_repo, pr_account, target_repo, pr_branch)

@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2018 Ghent University
+# Copyright 2012-2019 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -30,6 +30,7 @@ Intel Math Kernel Library (MKL), and Intel FFTW wrappers).
 :author: Kenneth Hoste (Ghent University)
 """
 from distutils.version import LooseVersion
+import re
 
 from easybuild.toolchains.iompi import Iompi
 from easybuild.toolchains.fft.intelfftw import IntelFFTW

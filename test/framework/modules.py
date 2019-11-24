@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2018 Ghent University
+# Copyright 2012-2019 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -34,6 +34,7 @@ import os
 import re
 import tempfile
 import shutil
+import stat
 import sys
 from distutils.version import StrictVersion
 from test.framework.utilities import EnhancedTestCase, TestLoaderFiltered, init_config
@@ -42,7 +43,7 @@ from unittest import TextTestRunner
 import easybuild.tools.modules as mod
 from easybuild.framework.easyblock import EasyBlock
 from easybuild.tools.build_log import EasyBuildError
-from easybuild.tools.filetools import copy_file, copy_dir, mkdir, read_file, remove_file, write_file
+from easybuild.tools.filetools import adjust_permissions, copy_file, copy_dir, mkdir, read_file, remove_file, write_file
 from easybuild.tools.modules import EnvironmentModules, EnvironmentModulesC, EnvironmentModulesTcl, Lmod, NoModulesTool
 from easybuild.tools.modules import curr_module_paths, get_software_libdir, get_software_root, get_software_version
 from easybuild.tools.modules import invalidate_module_caches_for, modules_tool, reset_module_caches
@@ -50,7 +51,7 @@ from easybuild.tools.run import run_cmd
 
 
 # number of modules included for testing purposes
-TEST_MODULES_COUNT = 78
+TEST_MODULES_COUNT = 81
 
 
 class ModulesTest(EnhancedTestCase):
@@ -119,7 +120,7 @@ class ModulesTest(EnhancedTestCase):
         else:
             self.assertEqual(len(ms), TEST_MODULES_COUNT)
 
-    def test_exists(self):
+    def test_exist(self):
         """Test if testing for module existence works."""
         self.init_testmods()
         self.assertEqual(self.modtool.exist(['OpenMPI/2.1.2-GCC-6.4.0-2.28']), [True])
@@ -127,7 +128,7 @@ class ModulesTest(EnhancedTestCase):
         self.assertEqual(self.modtool.exist(['foo/1.2.3']), [False])
         self.assertEqual(self.modtool.exist(['foo/1.2.3'], skip_avail=True), [False])
 
-        # exists works on hidden modules
+        # exist works on hidden modules
         self.assertEqual(self.modtool.exist(['toy/.0.0-deps']), [True])
         self.assertEqual(self.modtool.exist(['toy/.0.0-deps'], skip_avail=True), [True])
 
@@ -138,7 +139,11 @@ class ModulesTest(EnhancedTestCase):
         self.assertEqual(self.modtool.exist(['OpenMPI/2.1.2']), [False])
         self.assertEqual(self.modtool.exist(['OpenMPI/2.1.2'], skip_avail=True), [False])
 
-        # exists works on hidden modules in Lua syntax (only with Lmod)
+        # if we instruct modtool.exist not to consider partial module names, it doesn't
+        self.assertEqual(self.modtool.exist(['OpenMPI'], maybe_partial=False), [False])
+        self.assertEqual(self.modtool.exist(['OpenMPI'], maybe_partial=False, skip_avail=True), [False])
+
+        # exist works on hidden modules in Lua syntax (only with Lmod)
         test_modules_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'modules'))
         if isinstance(self.modtool, Lmod):
             # make sure only the .lua module file is there, otherwise this test doesn't work as intended
@@ -146,7 +151,7 @@ class ModulesTest(EnhancedTestCase):
             self.assertFalse(os.path.exists(os.path.join(test_modules_path, 'bzip2', '.1.0.6')))
             self.assertEqual(self.modtool.exist(['bzip2/.1.0.6']), [True])
 
-        # exists also works on lists of module names
+        # exist also works on lists of module names
         # list should be sufficiently long, since for short lists 'show' is always used
         mod_names = ['OpenMPI/2.1.2-GCC-6.4.0-2.28', 'foo/1.2.3', 'GCC',
                      'ScaLAPACK/2.0.2-gompi-2017b-OpenBLAS-0.2.20'
@@ -531,7 +536,7 @@ class ModulesTest(EnhancedTestCase):
             self.assertEqual(res, ['impi/2016', 'intel/2016'])
 
         else:
-            print "Skipping test_path_to_top_of_module_tree_lua, required Lmod as modules tool"
+            print("Skipping test_path_to_top_of_module_tree_lua, requires Lmod as modules tool")
 
     def test_interpret_raw_path_lua(self):
         """Test interpret_raw_path_lua method"""
@@ -818,7 +823,7 @@ class ModulesTest(EnhancedTestCase):
         self.assertEqual(len(mod.MODULE_AVAIL_CACHE), 1)
 
         # fetch cache entry
-        avail_cache_key = mod.MODULE_AVAIL_CACHE.keys()[0]
+        avail_cache_key = list(mod.MODULE_AVAIL_CACHE.keys())[0]
         cached_res = mod.MODULE_AVAIL_CACHE[avail_cache_key]
         self.assertTrue(cached_res == res)
 
@@ -1053,12 +1058,40 @@ class ModulesTest(EnhancedTestCase):
         self.assertErrorRegex(EasyBuildError, error_msg, init_config, args=['--detect-loaded-modules=sdvbfdgh'])
 
     def test_NoModulesTool(self):
+        """Test use of NoModulesTool class."""
         nmt = NoModulesTool(testing=True)
         self.assertEqual(len(nmt.available()), 0)
         self.assertEqual(len(nmt.available(mod_names='foo')), 0)
         self.assertEqual(len(nmt.list()), 0)
         self.assertEqual(nmt.exist(['foo', 'bar']), [False, False])
         self.assertEqual(nmt.exist(['foo', 'bar'], r'^\s*\S*/%s.*:\s*$', skip_avail=False), [False, False])
+
+    def test_modulecmd_strip_source(self):
+        """Test stripping of 'source' command in output of 'modulecmd python load'."""
+
+        init_config(build_options={'allow_modules_tool_mismatch': True})
+
+        # install dummy modulecmd command that always produces a 'source command' in its output
+        modulecmd = os.path.join(self.test_prefix, 'modulecmd')
+        modulecmd_txt = '\n'.join([
+            '#!/bin/bash',
+            # if last argument (${!#})) is --version, print version
+            'if [ x"${!#}" == "x--version" ]; then',
+            '  echo 3.2.10',
+            # otherwise, echo Python commands: set $TEST123 and include a faulty 'source' command
+            'else',
+            '  echo "source /opt/cray/pe/modules/3.2.10.6/init/bash"',
+            "  echo \"os.environ['TEST123'] = 'test123'\"",
+            'fi',
+        ])
+        write_file(modulecmd, modulecmd_txt)
+        adjust_permissions(modulecmd, stat.S_IXUSR, add=True)
+
+        os.environ['PATH'] = '%s:%s' % (self.test_prefix, os.getenv('PATH'))
+
+        modtool = EnvironmentModulesC()
+        modtool.run_module('load', 'test123')
+        self.assertEqual(os.getenv('TEST123'), 'test123')
 
 
 def suite():
@@ -1067,4 +1100,5 @@ def suite():
 
 
 if __name__ == '__main__':
-    TextTestRunner(verbosity=1).run(suite())
+    res = TextTestRunner(verbosity=1).run(suite())
+    sys.exit(len(res.failures))
