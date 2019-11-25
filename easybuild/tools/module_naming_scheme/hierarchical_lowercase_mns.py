@@ -32,10 +32,9 @@ Implementation of an example hierarchical module naming scheme.
 
 import os
 import re
-from vsc.utils import fancylogger
 
 from easybuild.tools.build_log import EasyBuildError
-from easybuild.tools.module_naming_scheme import ModuleNamingScheme
+from easybuild.tools.module_naming_scheme.mns import ModuleNamingScheme
 from easybuild.tools.module_naming_scheme.toolchain import det_toolchain_compilers, det_toolchain_mpi
 
 
