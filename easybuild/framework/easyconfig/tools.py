@@ -1,5 +1,5 @@
 # #
-# Copyright 2009-2019 Ghent University
+# Copyright 2009-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -90,7 +90,7 @@ _log = fancylogger.getLogger('easyconfig.tools', fname=False)
 def skip_available(easyconfigs, modtool):
     """Skip building easyconfigs for existing modules."""
     module_names = [ec['full_mod_name'] for ec in easyconfigs]
-    modules_exist = modtool.exist(module_names)
+    modules_exist = modtool.exist(module_names, maybe_partial=False)
     retained_easyconfigs = []
     for ec, mod_name, mod_exists in zip(easyconfigs, module_names, modules_exist):
         if mod_exists:
@@ -125,10 +125,10 @@ def find_resolved_modules(easyconfigs, avail_modules, modtool, retain_all_deps=F
         for dep in easyconfig['dependencies']:
             dep_mod_name = dep.get('full_mod_name', ActiveMNS().det_full_module_name(dep))
 
-            # treat external modules as resolved when retain_all_deps is enabled (e.g., under --dry-run),
+            # always treat external modules as resolved,
             # since no corresponding easyconfig can be found for them
-            if retain_all_deps and dep.get('external_module', False):
-                _log.debug("Treating dependency marked as external dependency as resolved: %s", dep_mod_name)
+            if dep.get('external_module', False):
+                _log.debug("Treating dependency marked as external module as resolved: %s", dep_mod_name)
 
             elif retain_all_deps and dep_mod_name not in avail_modules:
                 # if all dependencies should be retained, include dep unless it has been already
@@ -604,17 +604,21 @@ def dump_env_script(easyconfigs):
 
 def categorize_files_by_type(paths):
     """
-    Splits list of filepaths into a 3 separate lists: easyconfigs, files to delete and patch files
+    Splits list of filepaths into a 4 separate lists: easyconfigs, files to delete, patch files and
+    files with extension .py
     """
     res = {
         'easyconfigs': [],
         'files_to_delete': [],
         'patch_files': [],
+        'py_files': [],
     }
 
     for path in paths:
         if path.startswith(':'):
             res['files_to_delete'].append(path[1:])
+        elif path.endswith('.py'):
+            res['py_files'].append(path)
         # file must exist in order to check whether it's a patch file
         elif os.path.isfile(path) and is_patch_file(path):
             res['patch_files'].append(path)

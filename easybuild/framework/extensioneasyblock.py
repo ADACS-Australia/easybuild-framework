@@ -1,5 +1,5 @@
 ##
-# Copyright 2013-2019 Ghent University
+# Copyright 2013-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of the University of Ghent (http://ugent.be/hpc).
@@ -32,7 +32,7 @@ from easybuild.framework.easyblock import EasyBlock
 from easybuild.framework.easyconfig import CUSTOM
 from easybuild.framework.extension import Extension
 from easybuild.tools.build_log import EasyBuildError
-from easybuild.tools.filetools import apply_patch, change_dir, extract_file
+from easybuild.tools.filetools import change_dir, extract_file
 from easybuild.tools.utilities import remove_unwanted_chars, trace_msg
 
 
@@ -103,25 +103,24 @@ class ExtensionEasyBlock(EasyBlock, Extension):
         # unpack file if desired
         if unpack_src:
             targetdir = os.path.join(self.master.builddir, remove_unwanted_chars(self.name))
-            self.ext_dir = extract_file("%s" % self.src, targetdir, extra_options=self.unpack_options)
+            self.ext_dir = extract_file(self.src, targetdir, extra_options=self.unpack_options,
+                                        change_into_dir=False)
+            change_dir(self.ext_dir)
 
             if self.start_dir and os.path.isdir(self.start_dir):
                 self.log.debug("Using start_dir: %s", self.start_dir)
                 change_dir(self.start_dir)
 
         # patch if needed
-        if self.patches:
-            for patchfile in self.patches:
-                if not apply_patch(patchfile, self.ext_dir):
-                    raise EasyBuildError("Applying patch %s failed", patchfile)
+        EasyBlock.patch_step(self, beginpath=self.ext_dir)
 
     def sanity_check_step(self, exts_filter=None, custom_paths=None, custom_commands=None):
         """
         Custom sanity check for extensions, whether installed as stand-alone module or not
         """
-        if not self.cfg['exts_filter']:
+        if not self.cfg.get_ref('exts_filter'):
             self.cfg['exts_filter'] = exts_filter
-        self.log.debug("starting sanity check for extension with filter %s", self.cfg['exts_filter'])
+        self.log.debug("starting sanity check for extension with filter %s", self.cfg.get_ref('exts_filter'))
 
         # for stand-alone installations that were done for multiple dependency versions (via multi_deps),
         # we need to perform the extension sanity check for each of them, by loading the corresponding modules first

@@ -1,5 +1,5 @@
 ##
-# Copyright 2009-2019 Ghent University
+# Copyright 2009-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -46,7 +46,7 @@ class EB_toy(ExtensionEasyBlock):
 
     @staticmethod
     def extra_options(extra_vars=None):
-        """Custom easyconfig parameters for toytoy."""
+        """Custom easyconfig parameters for toy."""
         if extra_vars is None:
             extra_vars = {}
 

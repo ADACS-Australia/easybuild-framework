@@ -1,5 +1,5 @@
 # #
-# Copyright 2013-2019 Ghent University
+# Copyright 2013-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -126,7 +126,7 @@ class FormatYeb(EasyConfigFormat):
 
         return full_txt
 
-    def dump(self, ecfg, default_values, templ_const, templ_val):
+    def dump(self, ecfg, default_values, templ_const, templ_val, toolchain_hierarchy=None):
         """Dump parsed easyconfig in .yeb format"""
         raise NotImplementedError("Dumping of .yeb easyconfigs not supported yet")
 

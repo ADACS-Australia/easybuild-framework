@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2019 Ghent University
+# Copyright 2012-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -125,9 +125,8 @@ class EnhancedTestCase(TestCase):
         os.environ['EASYBUILD_ROBOT_PATHS'] = os.path.join(testdir, 'easyconfigs', 'test_ecs')
 
         # make sure no deprecated behaviour is being triggered (unless intended by the test)
-        # trip *all* log.deprecated statements by setting deprecation version ridiculously high
         self.orig_current_version = eb_build_log.CURRENT_VERSION
-        os.environ['EASYBUILD_DEPRECATED'] = '10000000'
+        self.disallow_deprecated_behaviour()
 
         init_config()
 
@@ -180,6 +179,11 @@ class EnhancedTestCase(TestCase):
         self.modtool = modules_tool()
         self.reset_modulepath([os.path.join(testdir, 'modules')])
         reset_module_caches()
+
+    def disallow_deprecated_behaviour(self):
+        """trip *all* log.deprecated statements by setting deprecation version ridiculously high"""
+        os.environ['EASYBUILD_DEPRECATED'] = '10000000'
+        eb_build_log.CURRENT_VERSION = os.environ['EASYBUILD_DEPRECATED']
 
     def allow_deprecated_behaviour(self):
         """Restore EasyBuild version to what it was originally, to allow triggering deprecated behaviour."""
@@ -435,6 +439,7 @@ def init_config(args=None, build_options=None, with_include=True):
         'extended_dry_run': False,
         'external_modules_metadata': ConfigObj(),
         'local_var_naming_check': 'error',
+        'silence_deprecation_warnings': eb_go.options.silence_deprecation_warnings,
         'suffix_modules_path': GENERAL_CLASS,
         'valid_module_classes': module_classes(),
         'valid_stops': [x[0] for x in EasyBlock.get_steps()],

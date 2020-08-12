@@ -1,5 +1,5 @@
 # #
-# Copyright 2013-2019 Ghent University
+# Copyright 2013-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -226,6 +226,7 @@ class EasyConfigParser(object):
 
         return cfg
 
-    def dump(self, ecfg, default_values, templ_const, templ_val):
+    def dump(self, ecfg, default_values, templ_const, templ_val, toolchain_hierarchy=None):
         """Dump easyconfig in format it was parsed from."""
-        return self._formatter.dump(ecfg, default_values, templ_const, templ_val)
+        return self._formatter.dump(ecfg, default_values, templ_const, templ_val,
+                                    toolchain_hierarchy=toolchain_hierarchy)

@@ -1,5 +1,5 @@
 ##
-# Copyright 2011-2019 Ghent University
+# Copyright 2011-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -33,16 +33,18 @@ import re
 from easybuild.base import fancylogger
 from easybuild.tools.build_log import EasyBuildError
 from easybuild.tools.config import Singleton
+from easybuild.tools.py2vs3 import create_base_metaclass
 
 
 DEVEL_MODULE_SUFFIX = '-easybuild-devel'
 
 
-class ModuleNamingScheme(object):
-    """Abstract class for a module naming scheme implementation."""
+# singleton metaclass: only one instance is created
+BaseModuleNamingScheme = create_base_metaclass('BaseModuleNamingScheme', Singleton, object)
 
-    # singleton metaclass: only one instance is created
-    __metaclass__ = Singleton
+
+class ModuleNamingScheme(BaseModuleNamingScheme):
+    """Abstract class for a module naming scheme implementation."""
 
     REQUIRED_KEYS = None
 
@@ -160,7 +162,7 @@ class ModuleNamingScheme(object):
         Default implementation checks via a strict regex pattern, and assumes short module names are of the form:
             <name>/<version>[-<toolchain>]
         """
-        modname_regex = re.compile('^%s(/\S+)?$' % re.escape(name))
+        modname_regex = re.compile(r'^%s(/\S+)?$' % re.escape(name))
         res = bool(modname_regex.match(short_modname))
 
         self.log.debug("Checking whether '%s' is a module name for software with name '%s' via regex %s: %s",

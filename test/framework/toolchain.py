@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2019 Ghent University
+# Copyright 2012-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -40,6 +40,7 @@ from unittest import TextTestRunner
 from test.framework.utilities import EnhancedTestCase, TestLoaderFiltered, find_full_path, init_config
 
 import easybuild.tools.modules as modules
+import easybuild.tools.toolchain as toolchain
 import easybuild.tools.toolchain.compiler
 from easybuild.framework.easyconfig.easyconfig import EasyConfig, ActiveMNS
 from easybuild.toolchains.system import SystemToolchain
@@ -49,6 +50,8 @@ from easybuild.tools.environment import setvar
 from easybuild.tools.filetools import adjust_permissions, copy_dir, find_eb_script, mkdir, read_file, write_file, which
 from easybuild.tools.py2vs3 import string_type
 from easybuild.tools.run import run_cmd
+from easybuild.tools.toolchain.mpi import get_mpi_cmd_template
+from easybuild.tools.toolchain.toolchain import env_vars_external_module
 from easybuild.tools.toolchain.utilities import get_toolchain, search_toolchain
 
 easybuild.tools.toolchain.compiler.systemtools.get_compiler_family = lambda: st.POWER
@@ -947,6 +950,48 @@ class ToolchainTest(EnhancedTestCase):
         tc = self.get_toolchain('intel', version='1970.01')
         self.assertErrorRegex(EasyBuildError, "No module found for toolchain", tc.prepare)
 
+    def test_mpi_cmd_prefix(self):
+        """Test mpi_exec_nranks function."""
+        self.modtool.prepend_module_path(self.test_prefix)
+
+        tc = self.get_toolchain('gompi', version='2018a')
+        tc.prepare()
+        self.assertEqual(tc.mpi_cmd_prefix(nr_ranks=2), "mpirun -n 2")
+        self.assertEqual(tc.mpi_cmd_prefix(nr_ranks='2'), "mpirun -n 2")
+        self.assertEqual(tc.mpi_cmd_prefix(), "mpirun -n 1")
+        self.modtool.purge()
+
+        self.setup_sandbox_for_intel_fftw(self.test_prefix)
+        tc = self.get_toolchain('intel', version='2018a')
+        tc.prepare()
+        self.assertEqual(tc.mpi_cmd_prefix(nr_ranks=2), "mpirun -n 2")
+        self.assertEqual(tc.mpi_cmd_prefix(nr_ranks='2'), "mpirun -n 2")
+        self.assertEqual(tc.mpi_cmd_prefix(), "mpirun -n 1")
+        self.modtool.purge()
+
+        self.setup_sandbox_for_intel_fftw(self.test_prefix, imklver='10.2.6.038')
+        tc = self.get_toolchain('intel', version='2012a')
+        tc.prepare()
+
+        mpi_exec_nranks_re = re.compile("^mpirun --file=.*/mpdboot -machinefile .*/nodes -np 4")
+        self.assertTrue(mpi_exec_nranks_re.match(tc.mpi_cmd_prefix(nr_ranks=4)))
+        mpi_exec_nranks_re = re.compile("^mpirun --file=.*/mpdboot -machinefile .*/nodes -np 1")
+        self.assertTrue(mpi_exec_nranks_re.match(tc.mpi_cmd_prefix()))
+
+        # test specifying custom template for MPI commands
+        init_config(build_options={'mpi_cmd_template': "mpiexec -np %(nr_ranks)s -- %(cmd)s", 'silent': True})
+        self.assertEqual(tc.mpi_cmd_prefix(nr_ranks="7"), "mpiexec -np 7 --")
+        self.assertEqual(tc.mpi_cmd_prefix(), "mpiexec -np 1 --")
+
+        # check that we return None when command does not appear at the end of the template
+        init_config(build_options={'mpi_cmd_template': "mpiexec -np %(nr_ranks)s -- %(cmd)s option", 'silent': True})
+        self.assertEqual(tc.mpi_cmd_prefix(nr_ranks="7"), None)
+        self.assertEqual(tc.mpi_cmd_prefix(), None)
+
+        # template with extra spaces at the end if fine though
+        init_config(build_options={'mpi_cmd_template': "mpirun -np %(nr_ranks)s %(cmd)s  ", 'silent': True})
+        self.assertEqual(tc.mpi_cmd_prefix(), "mpirun -np 1")
+
     def test_mpi_cmd_for(self):
         """Test mpi_cmd_for function."""
         self.modtool.prepend_module_path(self.test_prefix)
@@ -972,6 +1017,51 @@ class ToolchainTest(EnhancedTestCase):
         # test specifying custom template for MPI commands
         init_config(build_options={'mpi_cmd_template': "mpiexec -np %(nr_ranks)s -- %(cmd)s", 'silent': True})
         self.assertEqual(tc.mpi_cmd_for('test123', '7'), "mpiexec -np 7 -- test123")
+
+        # check whether expected error is raised when a template with missing keys is used;
+        # %(ranks)s should be %(nr_ranks)s
+        init_config(build_options={'mpi_cmd_template': "mpiexec -np %(ranks)s -- %(cmd)s", 'silent': True})
+        error_pattern = \
+            r"Missing templates in mpi-cmd-template value 'mpiexec -np %\(ranks\)s -- %\(cmd\)s': %\(nr_ranks\)s"
+        self.assertErrorRegex(EasyBuildError, error_pattern, tc.mpi_cmd_for, 'test', 1)
+
+        init_config(build_options={'mpi_cmd_template': "mpirun %(foo)s -np %(nr_ranks)s %(cmd)s", 'silent': True})
+        error_pattern = "Failed to complete MPI cmd template .* with .*: KeyError 'foo'"
+        self.assertErrorRegex(EasyBuildError, error_pattern, tc.mpi_cmd_for, 'test', 1)
+
+    def test_get_mpi_cmd_template(self):
+        """Test get_mpi_cmd_template function."""
+
+        # search_toolchain needs to be called once to make sure constants like toolchain.OPENMPI are in place
+        search_toolchain('')
+
+        input_params = {'nr_ranks': 123, 'cmd': 'this_is_just_a_test'}
+
+        for mpi_fam in [toolchain.OPENMPI, toolchain.MPICH, toolchain.MPICH2, toolchain.MVAPICH2]:
+            mpi_cmd_tmpl, params = get_mpi_cmd_template(mpi_fam, input_params)
+            self.assertEqual(mpi_cmd_tmpl, "mpirun -n %(nr_ranks)s %(cmd)s")
+            self.assertEqual(params, input_params)
+
+        # Intel MPI is a special case, also requires MPI version to be known
+        impi = toolchain.INTELMPI
+        error_pattern = "Intel MPI version unknown, can't determine MPI command template!"
+        self.assertErrorRegex(EasyBuildError, error_pattern, get_mpi_cmd_template, impi, {})
+
+        mpi_cmd_tmpl, params = get_mpi_cmd_template(toolchain.INTELMPI, input_params, mpi_version='1.0')
+        self.assertEqual(mpi_cmd_tmpl, "mpirun %(mpdbf)s %(nodesfile)s -np %(nr_ranks)s %(cmd)s")
+        self.assertEqual(sorted(params.keys()), ['cmd', 'mpdbf', 'nodesfile', 'nr_ranks'])
+        self.assertEqual(params['cmd'], 'this_is_just_a_test')
+        self.assertEqual(params['nr_ranks'], 123)
+
+        mpdbf = params['mpdbf']
+        regex = re.compile('^--file=.*/mpdboot$')
+        self.assertTrue(regex.match(mpdbf), "'%s' should match pattern '%s'" % (mpdbf, regex.pattern))
+        self.assertTrue(os.path.exists(mpdbf.split('=')[1]))
+
+        nodesfile = params['nodesfile']
+        regex = re.compile('^-machinefile /.*/nodes$')
+        self.assertTrue(regex.match(nodesfile), "'%s' should match pattern '%s'" % (nodesfile, regex.pattern))
+        self.assertTrue(os.path.exists(nodesfile.split(' ')[1]))
 
     def test_prepare_deps(self):
         """Test preparing for a toolchain when dependencies are involved."""
@@ -1160,6 +1250,35 @@ class ToolchainTest(EnhancedTestCase):
         tc.prepare()
         # no dependencies found in iccifort module
         self.assertEqual(tc.toolchain_dep_mods, [])
+
+    def test_standalone_iccifortcuda(self):
+        """Test whether standalone installation of iccifortcuda matches the iccifortcuda toolchain definition."""
+
+        tc = self.get_toolchain('iccifortcuda', version='2018b')
+        tc.prepare()
+        self.assertEqual(tc.toolchain_dep_mods, ['icc/2018.1.163', 'ifort/2018.1.163', 'CUDA/9.1.85'])
+        self.modtool.purge()
+
+        for key in ['EBROOTICC', 'EBROOTIFORT', 'EBVERSIONICC', 'EBVERSIONIFORT', 'EBROOTCUDA', 'EBVERSIONCUDA']:
+            self.assertTrue(os.getenv(key) is None)
+
+        # install fake iccifortcuda module with no dependencies
+        fake_iccifortcuda = os.path.join(self.test_prefix, 'iccifortcuda', '2018b')
+        write_file(fake_iccifortcuda, "#%Module")
+        self.modtool.use(self.test_prefix)
+
+        # toolchain verification fails because icc/ifort are not dependencies of iccifortcuda modules,
+        # and corresponding environment variables are not set
+        error_pattern = "List of toolchain dependency modules and toolchain definition do not match"
+        self.assertErrorRegex(EasyBuildError, error_pattern, tc.prepare)
+        self.modtool.purge()
+
+        # Verify that it works loading a module that contains a combined iccifort module
+        tc = self.get_toolchain('iccifortcuda', version='2019a')
+        # toolchain preparation (which includes verification) works fine now
+        tc.prepare()
+        # dependencies found in iccifortcuda module
+        self.assertEqual(tc.toolchain_dep_mods, ['iccifort/2019.5.281', 'CUDA/9.1.85'])
 
     def test_independence(self):
         """Test independency of toolchain instances."""
@@ -1800,6 +1919,25 @@ class ToolchainTest(EnhancedTestCase):
 
         # we may have created our own short tmpdir above, so make sure to clean things up...
         shutil.rmtree(orig_tmpdir)
+
+    def test_env_vars_external_module(self):
+        """Test env_vars_external_module function."""
+
+        res = env_vars_external_module('test', '1.2.3', {'prefix': '/software/test/1.2.3'})
+        expected = {'EBVERSIONTEST': '1.2.3', 'EBROOTTEST': '/software/test/1.2.3'}
+        self.assertEqual(res, expected)
+
+        res = env_vars_external_module('test-test', '1.2.3', {})
+        expected = {'EBVERSIONTESTMINTEST': '1.2.3'}
+        self.assertEqual(res, expected)
+
+        res = env_vars_external_module('test', None, {'prefix': '/software/test/1.2.3'})
+        expected = {'EBROOTTEST': '/software/test/1.2.3'}
+        self.assertEqual(res, expected)
+
+        res = env_vars_external_module('test', None, {})
+        expected = {}
+        self.assertEqual(res, expected)
 
 
 def suite():

@@ -1,5 +1,5 @@
 ##
-# Copyright 2011-2019 Ghent University
+# Copyright 2011-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -43,11 +43,29 @@ from socket import gethostname
 
 from easybuild.base import fancylogger
 from easybuild.tools.build_log import EasyBuildError
+from easybuild.tools.config import build_option
 from easybuild.tools.filetools import is_readable, read_file, which
+from easybuild.tools.py2vs3 import string_type
 from easybuild.tools.run import run_cmd
 
 
 _log = fancylogger.getLogger('systemtools', fname=False)
+
+
+try:
+    import distro
+    HAVE_DISTRO = True
+except ImportError as err:
+    _log.debug("Failed to import 'distro' Python module: %s", err)
+    HAVE_DISTRO = False
+
+try:
+    from archspec.cpu import host as archspec_cpu_host
+    HAVE_ARCHSPEC = True
+except ImportError as err:
+    _log.debug("Failed to import 'archspec' Python module: %s", err)
+    HAVE_ARCHSPEC = False
+
 
 # Architecture constants
 AARCH32 = 'AArch32'
@@ -103,6 +121,9 @@ VENDOR_IDS = {
     'AuthenticAMD': AMD,
     'GenuineIntel': INTEL,
     'IBM': IBM,
+    # IBM POWER9
+    '8335-GTH': IBM,
+    '8335-GTX': IBM,
 }
 # ARM Cortex part numbers from the corresponding ARM Processor Technical Reference Manuals,
 # see http://infocenter.arm.com - Cortex-A series processors, Section "Main ID Register"
@@ -265,7 +286,7 @@ def get_cpu_vendor():
         if arch == X86_64:
             vendor_regex = re.compile(r"vendor_id\s+:\s*(\S+)")
         elif arch == POWER:
-            vendor_regex = re.compile(r"model\s+:\s*(\w+)")
+            vendor_regex = re.compile(r"model\s+:\s*((\w|-)+)")
         elif arch in [AARCH32, AARCH64]:
             vendor_regex = re.compile(r"CPU implementer\s+:\s*(\S+)")
 
@@ -319,7 +340,7 @@ def get_cpu_family():
 
             # Distinguish POWER running in little-endian mode
             system, node, release, version, machine, processor = platform.uname()
-            powerle_regex = re.compile("^ppc(\d*)le")
+            powerle_regex = re.compile(r"^ppc(\d*)le")
             if powerle_regex.search(machine):
                 family = POWER_LE
 
@@ -328,6 +349,22 @@ def get_cpu_family():
         _log.warning("Failed to determine CPU family, returning %s" % family)
 
     return family
+
+
+def get_cpu_arch_name():
+    """
+    Determine CPU architecture name via archspec (if available).
+    """
+    cpu_arch_name = None
+    if HAVE_ARCHSPEC:
+        res = archspec_cpu_host()
+        if res:
+            cpu_arch_name = str(res.name)
+
+    if cpu_arch_name is None:
+        cpu_arch_name = UNKNOWN
+
+    return cpu_arch_name
 
 
 def get_cpu_model():
@@ -443,11 +480,11 @@ def get_cpu_features():
                 _log.debug("Found CPU features using regex '%s': %s", flags_regex.pattern, cpu_feat)
             elif get_cpu_architecture() == POWER:
                 # for Linux@POWER systems, no flags/features are listed, but we can check for Altivec
-                cpu_altivec_regex = re.compile("^cpu\s*:.*altivec supported", re.M)
+                cpu_altivec_regex = re.compile(r"^cpu\s*:.*altivec supported", re.M)
                 if cpu_altivec_regex.search(proc_cpuinfo):
                     cpu_feat.append('altivec')
                 # VSX is supported since POWER7
-                cpu_power7_regex = re.compile("^cpu\s*:.*POWER(7|8|9)", re.M)
+                cpu_power7_regex = re.compile(r"^cpu\s*:.*POWER(7|8|9)", re.M)
                 if cpu_power7_regex.search(proc_cpuinfo):
                     cpu_feat.append('vsx')
             else:
@@ -531,12 +568,25 @@ def get_os_name():
     Determine system name, e.g., 'redhat' (generic), 'centos', 'debian', 'fedora', 'suse', 'ubuntu',
     'red hat enterprise linux server', 'SL' (Scientific Linux), 'opensuse', ...
     """
-    # platform.linux_distribution is more useful, but only available since Python 2.6
-    # this allows to differentiate between Fedora, CentOS, RHEL and Scientific Linux (Rocks is just CentOS)
-    os_name = platform.linux_distribution()[0].strip().lower()
+    os_name = None
+
+    # platform.linux_distribution was removed in Python 3.8,
+    # see https://docs.python.org/2/library/platform.html#platform.linux_distribution
+    if hasattr(platform, 'linux_distribution'):
+        # platform.linux_distribution is more useful, but only available since Python 2.6
+        # this allows to differentiate between Fedora, CentOS, RHEL and Scientific Linux (Rocks is just CentOS)
+        os_name = platform.linux_distribution()[0].strip().lower()
+    elif HAVE_DISTRO:
+        # distro package is the recommended alternative to platform.linux_distribution,
+        # see https://pypi.org/project/distro
+        os_name = distro.name()
+    else:
+        # no easy way to determine name of Linux distribution
+        os_name = None
 
     os_name_map = {
         'red hat enterprise linux server': 'RHEL',
+        'red hat enterprise linux': 'RHEL',  # RHEL8 has no server/client
         'scientific linux sl': 'SL',
         'scientific linux': 'SL',
         'suse linux enterprise server': 'SLES',
@@ -550,7 +600,15 @@ def get_os_name():
 
 def get_os_version():
     """Determine system version."""
-    os_version = platform.dist()[1]
+
+    # platform.dist was removed in Python 3.8
+    if hasattr(platform, 'dist'):
+        os_version = platform.dist()[1]
+    elif HAVE_DISTRO:
+        os_version = distro.version()
+    else:
+        os_version = None
+
     if os_version:
         if get_os_name() in ["suse", "SLES"]:
 
@@ -665,7 +723,7 @@ def get_gcc_version():
 
     # Fedora: gcc (GCC) 5.1.1 20150618 (Red Hat 5.1.1-4)
     # Debian: gcc (Debian 4.9.2-10) 4.9.2
-    find_version = re.search("^gcc\s+\([^)]+\)\s+(?P<version>[^\s]+)\s+", out)
+    find_version = re.search(r"^gcc\s+\([^)]+\)\s+(?P<version>[^\s]+)\s+", out)
     if find_version:
         res = find_version.group('version')
         _log.debug("Found GCC version: %s from %s", res, out)
@@ -711,6 +769,8 @@ def get_system_info():
     return {
         'core_count': get_avail_core_count(),
         'total_memory': get_total_memory(),
+        'cpu_arch': get_cpu_architecture(),
+        'cpu_arch_name': get_cpu_arch_name(),
         'cpu_model': get_cpu_model(),
         'cpu_speed': get_cpu_speed(),
         'cpu_vendor': get_cpu_vendor(),
@@ -802,3 +862,72 @@ def det_terminal_size():
             height, width = 25, 80
 
     return height, width
+
+
+def check_python_version():
+    """Check currently used Python version."""
+    python_maj_ver = sys.version_info[0]
+    python_min_ver = sys.version_info[1]
+    python_ver = '%d.%d' % (python_maj_ver, python_min_ver)
+    _log.info("Found Python version %s", python_ver)
+
+    silence_deprecation_warnings = build_option('silence_deprecation_warnings') or []
+
+    if python_maj_ver == 2:
+        if python_min_ver < 6:
+            raise EasyBuildError("Python 2.6 or higher is required when using Python 2, found Python %s", python_ver)
+        elif python_min_ver == 6:
+            depr_msg = "Running EasyBuild with Python 2.6 is deprecated"
+            if 'Python26' in silence_deprecation_warnings:
+                _log.warning(depr_msg)
+            else:
+                _log.deprecated(depr_msg, '5.0')
+        else:
+            _log.info("Running EasyBuild with Python 2 (version %s)", python_ver)
+
+    elif python_maj_ver == 3:
+        if python_min_ver < 5:
+            raise EasyBuildError("Python 3.5 or higher is required when using Python 3, found Python %s", python_ver)
+        else:
+            _log.info("Running EasyBuild with Python 3 (version %s)", python_ver)
+    else:
+        raise EasyBuildError("EasyBuild is not compatible (yet) with Python %s", python_ver)
+
+    return (python_maj_ver, python_min_ver)
+
+
+def pick_dep_version(dep_version):
+    """
+    Pick the correct dependency version to use for this system.
+    Input can either be:
+    * a string value (or None)
+    * a dict with options to choose from
+
+    Return value is the version to use.
+    """
+    if isinstance(dep_version, string_type):
+        _log.debug("Version is already a string ('%s'), OK", dep_version)
+        result = dep_version
+
+    elif dep_version is None:
+        _log.debug("Version is None, OK")
+        result = None
+
+    elif isinstance(dep_version, dict):
+        # figure out matches based on dict keys (after splitting on '=')
+        my_arch_key = 'arch=%s' % get_cpu_architecture()
+        arch_keys = [x for x in dep_version.keys() if x.startswith('arch=')]
+        other_keys = [x for x in dep_version.keys() if x not in arch_keys]
+        if other_keys:
+            raise EasyBuildError("Unexpected keys in version: %s. Only 'arch=' keys are supported", other_keys)
+        if arch_keys:
+            if my_arch_key in dep_version:
+                result = dep_version[my_arch_key]
+                _log.info("Version selected from %s using key %s: %s", dep_version, my_arch_key, result)
+            else:
+                raise EasyBuildError("No matches for version in %s (looking for %s)", dep_version, my_arch_key)
+
+    else:
+        raise EasyBuildError("Unknown value type for version: %s", dep_version)
+
+    return result
