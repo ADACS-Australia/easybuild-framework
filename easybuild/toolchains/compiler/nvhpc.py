@@ -26,30 +26,33 @@
 # along with EasyBuild.  If not, see <http://www.gnu.org/licenses/>.
 ##
 """
-Support for PGI compilers (pgcc, pgc++, pgf90/pgfortran) as toolchain compilers.
+Support for NVIDIA HPC SDK ('NVHPC') compilers (nvc, nvc++, nvfortran) as toolchain compilers.
+NVHPC is the successor of the PGI compilers, on which this file is based upon.
 
 :author: Bart Oldeman (McGill University, Calcul Quebec, Compute Canada)
 :author: Damian Alvarez (Forschungszentrum Juelich GmbH)
+:author: Andreas Herten (Forschungszentrum Juelich GmbH)
 """
-
-from distutils.version import LooseVersion
 
 import easybuild.tools.systemtools as systemtools
 from easybuild.tools.toolchain.compiler import Compiler
 
 
-TC_CONSTANT_PGI = "PGI"
+TC_CONSTANT_NVHPC = "NVHPC"
 
 
-class Pgi(Compiler):
-    """PGI compiler class
+class NVHPC(Compiler):
+    """NVHPC compiler class
     """
 
-    COMPILER_MODULE_NAME = ['PGI']
+    COMPILER_MODULE_NAME = ['NVHPC']
 
-    COMPILER_FAMILY = TC_CONSTANT_PGI
+    COMPILER_FAMILY = TC_CONSTANT_NVHPC
 
     # References:
+    # https://docs.nvidia.com/hpc-sdk/compilers/hpc-compilers-user-guide/index.html
+    # nvc --help
+    # And previously, for PGI:
     # http://www.pgroup.com/doc/pgiref.pdf
     # http://www.pgroup.com/products/freepgi/freepgi_ref/ch02.html#Mflushz
     # http://www.pgroup.com/products/freepgi/freepgi_ref/ch02.html#Mfprelaxed
@@ -70,22 +73,21 @@ class Pgi(Compiler):
 
     # used when 'optarch' toolchain option is enabled (and --optarch is not specified)
     COMPILER_OPTIMAL_ARCHITECTURE_OPTION = {
-        (systemtools.X86_64, systemtools.AMD): '',
-        (systemtools.X86_64, systemtools.INTEL): '',
+        (systemtools.X86_64, systemtools.AMD): 'tp=host',
+        (systemtools.X86_64, systemtools.INTEL): 'tp=host',
     }
     # used with --optarch=GENERIC
     COMPILER_GENERIC_OPTION = {
-        (systemtools.X86_64, systemtools.AMD): 'tp=x64',
-        (systemtools.X86_64, systemtools.INTEL): 'tp=x64',
+        (systemtools.X86_64, systemtools.AMD): 'tp=px',
+        (systemtools.X86_64, systemtools.INTEL): 'tp=px',
     }
 
-    COMPILER_CC = 'pgcc'
-    # C++ compiler command is version-dependent, see below
-    COMPILER_CXX = None
+    COMPILER_CC = 'nvc'
+    COMPILER_CXX = 'nvc++'
 
-    COMPILER_F77 = 'pgf77'
-    COMPILER_F90 = 'pgf90'
-    COMPILER_FC = 'pgfortran'
+    COMPILER_F77 = 'nvfortran'
+    COMPILER_F90 = 'nvfortran'
+    COMPILER_FC = 'nvfortran'
 
     LINKER_TOGGLE_STATIC_DYNAMIC = {
         'static': '-Bstatic',
@@ -96,21 +98,8 @@ class Pgi(Compiler):
         """Set -tp=x64 if optarch is set to False."""
         if not self.options.get('optarch', False):
             self.variables.nextend('OPTFLAGS', ['tp=x64'])
-        super(Pgi, self)._set_compiler_flags()
+        super(NVHPC, self)._set_compiler_flags()
 
     def _set_compiler_vars(self):
         """Set the compiler variables"""
-        pgi_version = self.get_software_version(self.COMPILER_MODULE_NAME)[0]
-
-        # based on feedback from PGI support: use pgc++ with PGI 14.10 and newer, pgCC for older versions
-        if LooseVersion(pgi_version) >= LooseVersion('14.10'):
-            self.COMPILER_CXX = 'pgc++'
-        else:
-            self.COMPILER_CXX = 'pgCC'
-
-        if LooseVersion(pgi_version) >= LooseVersion('19.1'):
-            self.COMPILER_F77 = 'pgfortran'
-        else:
-            self.COMPILER_F77 = 'pgf77'
-
-        super(Pgi, self)._set_compiler_vars()
+        super(NVHPC, self)._set_compiler_vars()

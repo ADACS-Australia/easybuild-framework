@@ -112,6 +112,7 @@ _path_indexes = {}
 
 def handle_deprecated_or_replaced_easyconfig_parameters(ec_method):
     """Decorator to handle deprecated/replaced easyconfig parameters."""
+
     def new_ec_method(self, key, *args, **kwargs):
         """Check whether any replace easyconfig parameters are still used"""
         # map deprecated parameters to their replacements, issue deprecation warning(/error)
@@ -660,18 +661,18 @@ class EasyConfig(object):
 
         self.log.info("Parsing easyconfig file %s with rawcontent: %s", self.path, self.rawtxt)
         self.parser.set_specifications(arg_specs)
-        local_vars = self.parser.get_config_dict()
-        self.log.debug("Parsed easyconfig as a dictionary: %s" % local_vars)
+        ec_vars = self.parser.get_config_dict()
+        self.log.debug("Parsed easyconfig as a dictionary: %s" % ec_vars)
 
         # make sure all mandatory parameters are defined
         # this includes both generic mandatory parameters and software-specific parameters defined via extra_options
-        missing_mandatory_keys = [key for key in self.mandatory if key not in local_vars]
+        missing_mandatory_keys = [key for key in self.mandatory if key not in ec_vars]
         if missing_mandatory_keys:
             raise EasyBuildError("mandatory parameters not provided in %s: %s", self.path, missing_mandatory_keys)
 
-        # provide suggestions for typos
+        # provide suggestions for typos. Local variable names are excluded from this check
         possible_typos = [(key, difflib.get_close_matches(key.lower(), self._config.keys(), 1, 0.85))
-                          for key in local_vars if key not in self]
+                          for key in ec_vars if not is_local_var_name(key) and key not in self]
 
         typos = [(key, guesses[0]) for (key, guesses) in possible_typos if len(guesses) == 1]
         if typos:
@@ -679,7 +680,7 @@ class EasyConfig(object):
                                  ', '.join(["%s -> %s" % typo for typo in typos]))
 
         # set keys in current EasyConfig instance based on dict obtained by parsing easyconfig file
-        known_ec_params, self.unknown_keys = triage_easyconfig_params(local_vars, self._config)
+        known_ec_params, self.unknown_keys = triage_easyconfig_params(ec_vars, self._config)
 
         self.set_keys(known_ec_params)
 
@@ -1250,9 +1251,9 @@ class EasyConfig(object):
                 soft_name = soft_name[len(cray_prefix):]
 
         # determine software name to use in names of environment variables (upper case, '-' becomes '_')
-        soft_name_in_mod_name = convert_name(soft_name.replace('-', '_'), upper=True)
+        soft_name_env_var_infix = convert_name(soft_name.replace('-', '_'), upper=True)
 
-        var_name_pairs = [
+        var_name_pairs_templates = [
             ('CRAY_%s_PREFIX', 'CRAY_%s_VERSION'),
             ('CRAY_%s_PREFIX_DIR', 'CRAY_%s_VERSION'),
             ('CRAY_%s_DIR', 'CRAY_%s_VERSION'),
@@ -1263,10 +1264,20 @@ class EasyConfig(object):
             ('%s_HOME', '%s_VERSION'),
         ]
 
-        for prefix_var_name, version_var_name in var_name_pairs:
-            prefix_var_name = prefix_var_name % soft_name_in_mod_name
-            version_var_name = version_var_name % soft_name_in_mod_name
+        def mk_var_name_pair(var_name_pair, name):
+            """Complete variable name pair template using provided name."""
+            return (var_name_pair[0] % name, var_name_pair[1] % name)
 
+        var_name_pairs = [mk_var_name_pair(x, soft_name_env_var_infix) for x in var_name_pairs_templates]
+
+        # also consider name based on module name for environment variables to check
+        # for example, for the cray-netcdf-hdf5parallel module we should also check $CRAY_NETCDF_HDF5PARALLEL_VERSION
+        mod_name_env_var_infix = convert_name(mod_name.split('/')[0].replace('-', '_'), upper=True)
+
+        if mod_name_env_var_infix != soft_name_env_var_infix:
+            var_name_pairs.extend([mk_var_name_pair(x, mod_name_env_var_infix) for x in var_name_pairs_templates])
+
+        for prefix_var_name, version_var_name in var_name_pairs:
             prefix = self.modules_tool.get_setenv_value_from_modulefile(mod_name, prefix_var_name)
             version = self.modules_tool.get_setenv_value_from_modulefile(mod_name, version_var_name)
 
