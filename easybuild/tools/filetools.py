@@ -1355,8 +1355,8 @@ def convert_name(name, upper=False):
         return name
 
 
-def adjust_permissions(provided_path, permission_bits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
-                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=None):
+def adjust_permissions(name, permissionBits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
+                       group_id=None, relative=True, ignore_errors=False, skip_symlinks=None, stdout=False):
     """
     Change permissions for specified path, using specified permission bits
 
@@ -1446,7 +1446,10 @@ def adjust_permissions(provided_path, permission_bits, add=True, onlyfiles=False
         except OSError as err:
             if ignore_errors:
                 # ignore errors while adjusting permissions (for example caused by bad links)
-                _log.info("Failed to chmod/chown %s (but ignoring it): %s", path, err)
+                if stdout:
+                    print("Failed to chmod/chown %s (but ignoring it): %s" % (path, err))
+                else:
+                    _log.info("Failed to chmod/chown %s (but ignoring it): %s" % (path, err))
                 fail_cnt += 1
             else:
                 failed_paths.append(path)

@@ -41,6 +41,7 @@ The EasyBlock class should serve as a base class for all easyblocks.
 
 import copy
 import glob
+import grp
 import inspect
 import os
 import re
@@ -66,7 +67,8 @@ from easybuild.tools import config, run
 from easybuild.tools.build_details import get_build_stats
 from easybuild.tools.build_log import EasyBuildError, dry_run_msg, dry_run_warning, dry_run_set_dirs
 from easybuild.tools.build_log import print_error, print_msg, print_warning
-from easybuild.tools.config import FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_PATCHES, FORCE_DOWNLOAD_SOURCES
+from easybuild.tools.config import FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_PATCHES, FORCE_DOWNLOAD_SOURCES, \
+    ConfigurationVariables
 from easybuild.tools.config import build_option, build_path, get_log_filename, get_repository, get_repositorypath
 from easybuild.tools.config import install_path, log_path, package_path, source_paths
 from easybuild.tools.environment import restore_env, sanitize_env
@@ -237,21 +239,14 @@ class EasyBlock(object):
         # initialize logger
         self._init_log()
 
-        # try and use the specified group (if any)
-        group_name = build_option('group')
-        group_spec = self.cfg['group']
-        if group_spec is not None:
-            if isinstance(group_spec, tuple):
-                if len(group_spec) == 2:
-                    group_spec = group_spec[0]
-                else:
-                    raise EasyBuildError("Found group spec in tuple format that is not a 2-tuple: %s", str(group_spec))
-            self.log.warning("Group spec '%s' is overriding config group '%s'." % (group_spec, group_name))
-            group_name = group_spec
+        # force the group to be set to "apps" for ozstar
+        group_name = "apps"
+        try:
+            group_id = grp.getgrnam(group_name).gr_gid
+        except KeyError, err:
+            raise EasyBuildError("Failed to get group ID for '%s', group does not exist (err: %s)", group_name, err)
 
-        self.group = None
-        if group_name is not None:
-            self.group = use_group(group_name)
+        self.group = (group_name, group_id)
 
         # generate build/install directories
         self.gen_builddir()
@@ -1357,17 +1352,17 @@ class EasyBlock(object):
         """
         Create the necessary group check.
         """
-        group_error_msg = None
-        ec_group = self.cfg['group']
-        if ec_group is not None and isinstance(ec_group, tuple):
-            group_error_msg = ec_group[1]
+        # group_error_msg = None
+        # ec_group = self.cfg['group']
+        # if ec_group is not None and isinstance(ec_group, tuple):
+        #     group_error_msg = ec_group[1]
+        #
+        # if self.group is not None:
+        #     txt = self.module_generator.check_group(self.group[0], error_msg=group_error_msg)
+        # else:
+        #     txt = ''
 
-        if self.group is not None:
-            txt = self.module_generator.check_group(self.group[0], error_msg=group_error_msg)
-        else:
-            txt = ''
-
-        return txt
+        return ''
 
     def make_module_req(self):
         """
@@ -2933,14 +2928,39 @@ class EasyBlock(object):
         Finalize installation procedure: adjust permissions as configured, change group ownership (if requested).
         Installing user must be member of the group that it is changed to.
         """
-        if self.group is not None:
-            # remove permissions for others, and set group ID
+        # First set the group owner to apps and set relevant permissions
+        try:
+            # Start by removing write access from others
+            perms = stat.S_IWOTH
+            adjust_permissions(self.installdir, perms, add=False, recursive=True,
+                               relative=True, ignore_errors=True, stdout=True)
+
+            # Next make sure owner and group write is set, and read for owner, group, and other
+            perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+            adjust_permissions(self.installdir, perms, add=True, recursive=True, relative=True, ignore_errors=True,
+                               group_id=self.group[1], stdout=True)
+            print("Successfully set permissions to rw?rw?r-? for path: " + self.installdir)
+
+        except EasyBuildError, err:
+            raise EasyBuildError("Unable to change group permissions of file(s): %s", err)
+
+        # Next set permissions for any extra locations specified in the easybuild configuration
+        for path in ConfigurationVariables()['extra_permission_paths']:
             try:
-                perms = stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
-                adjust_permissions(self.installdir, perms, add=False, recursive=True, group_id=self.group[1],
-                                   relative=True, ignore_errors=True)
-            except EasyBuildError as err:
+                # Start by removing write access from others
+                perms = stat.S_IWOTH
+                adjust_permissions(path, perms, add=False, recursive=True, relative=True, ignore_errors=True,
+                                   stdout=True)
+
+                # Next make sure owner and group write is set, and read for owner, group, and other
+                perms = stat.S_IWUSR | stat.S_IWGRP | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+                adjust_permissions(path, perms, add=True, recursive=True, relative=True, ignore_errors=True,
+                                   group_id=self.group[1], stdout=True)
+                print("Successfully set permissions to rw?rw?r-? for path: " + path)
+
+            except EasyBuildError, err:
                 raise EasyBuildError("Unable to change group permissions of file(s): %s", err)
+
             self.log.info("Successfully made software only available for group %s (gid %s)" % self.group)
 
         if build_option('read_only_installdir'):
@@ -3173,8 +3193,8 @@ class EasyBlock(object):
             (SANITYCHECK_STEP, 'sanity checking', [lambda x: x.sanity_check_step], True),
             (CLEANUP_STEP, 'cleaning up', [lambda x: x.cleanup_step], False),
             (MODULE_STEP, 'creating module', [lambda x: x.make_module_step], False),
-            (PERMISSIONS_STEP, 'permissions', [lambda x: x.permissions_step], False),
             (PACKAGE_STEP, 'packaging', [lambda x: x.package_step], False),
+            #(PERMISSIONS_STEP, 'permissions', [lambda x: x.permissions_step], False),
         ]
 
         # full list of steps, included iterated steps
@@ -3457,9 +3477,7 @@ def build_and_install_one(ecdict, init_env):
         logs = glob.glob('%s*' % application_log)
         print_msg("Results of the build can be found in the log file(s) %s" % ', '.join(logs), log=_log, silent=silent)
 
-    del app
-
-    return (success, application_log, errormsg)
+    return (success, application_log, errormsg, app)
 
 
 def copy_easyblocks_for_reprod(easyblock_instances, reprod_dir):

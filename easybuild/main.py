@@ -112,7 +112,7 @@ def build_and_install_software(ecs, init_session_state, exit_on_failure=True):
     for ec in ecs:
         ec_res = {}
         try:
-            (ec_res['success'], app_log, err) = build_and_install_one(ec, init_env)
+            (ec_res['success'], app_log, err, app) = build_and_install_one(ec, init_env)
             ec_res['log_file'] = app_log
             if not ec_res['success']:
                 ec_res['err'] = EasyBuildError(err)
@@ -142,6 +142,12 @@ def build_and_install_software(ecs, init_session_state, exit_on_failure=True):
                 adjust_permissions(parent_dir, stat.S_IWUSR, add=True, recursive=False)
                 write_file(test_report_fp, test_report_txt['full'])
                 adjust_permissions(parent_dir, stat.S_IWUSR, add=False, recursive=False)
+
+        # Fix permissions
+        print("Running permissions step after moving logs, permission errors will only be printed to the stdout.")
+        app.permissions_step()
+
+        del app
 
         if not ec_res['success'] and exit_on_failure:
             if 'traceback' in ec_res:

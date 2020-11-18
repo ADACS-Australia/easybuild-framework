@@ -552,6 +552,8 @@ class EasyBuildOptions(GeneralOption):
                            None, 'store', None),
             'tmp-logdir': ("Log directory where temporary log files are stored", None, 'store', None),
             'tmpdir': ('Directory to use for temporary storage', None, 'store', None),
+            'extra_permission_paths': ('List of extra paths to apply OzSTAR apps group specific permissions to',
+                                       'strlist', 'store', [])
         })
 
         self.log.debug("config_options: descr %s opts %s" % (descr, opts))

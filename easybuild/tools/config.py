@@ -407,6 +407,7 @@ class ConfigurationVariables(BaseConfigurationVariables):
         'subdir_modules',
         'subdir_software',
         'tmp_logdir',
+        'extra_permission_paths'
     ]
     KNOWN_KEYS = REQUIRED  # KNOWN_KEYS must be defined for FrozenDictKnownKeys functionality
 
