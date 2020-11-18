@@ -1,5 +1,5 @@
 # #
-# Copyright 2009-2019 Ghent University
+# Copyright 2009-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -36,6 +36,7 @@ Easyconfig module that contains the EasyConfig class.
 :author: Alan O'Cais (Juelich Supercomputing Centre)
 :author: Bart Oldeman (McGill University, Calcul Quebec, Compute Canada)
 :author: Maxime Boissonneault (Universite Laval, Calcul Quebec, Compute Canada)
+:author: Victor Holanda (CSCS, ETH Zurich)
 """
 
 import copy
@@ -44,7 +45,9 @@ import functools
 import os
 import re
 from distutils.version import LooseVersion
+from contextlib import contextmanager
 
+import easybuild.tools.filetools as filetools
 from easybuild.base import fancylogger
 from easybuild.framework.easyconfig import MANDATORY
 from easybuild.framework.easyconfig.constants import EXTERNAL_MODULE_MARKER
@@ -58,17 +61,19 @@ from easybuild.framework.easyconfig.parser import DEPRECATED_PARAMETERS, REPLACE
 from easybuild.framework.easyconfig.parser import EasyConfigParser, fetch_parameters_from_easyconfig
 from easybuild.framework.easyconfig.templates import TEMPLATE_CONSTANTS, template_constant_dict
 from easybuild.tools.build_log import EasyBuildError, print_warning, print_msg
-from easybuild.tools.config import LOCAL_VAR_NAMING_CHECK_ERROR, LOCAL_VAR_NAMING_CHECK_LOG, LOCAL_VAR_NAMING_CHECK_WARN
+from easybuild.tools.config import GENERIC_EASYBLOCK_PKG, LOCAL_VAR_NAMING_CHECK_ERROR, LOCAL_VAR_NAMING_CHECK_LOG
+from easybuild.tools.config import LOCAL_VAR_NAMING_CHECK_WARN
 from easybuild.tools.config import Singleton, build_option, get_module_naming_scheme
-from easybuild.tools.filetools import EASYBLOCK_CLASS_PREFIX, copy_file, decode_class_name, encode_class_name
-from easybuild.tools.filetools import find_backup_name_candidate, find_easyconfigs, read_file, write_file
+from easybuild.tools.filetools import convert_name, copy_file, create_index, decode_class_name, encode_class_name
+from easybuild.tools.filetools import find_backup_name_candidate, find_easyconfigs, load_index
+from easybuild.tools.filetools import read_file, write_file
 from easybuild.tools.hooks import PARSE, load_hooks, run_hook
 from easybuild.tools.module_naming_scheme.mns import DEVEL_MODULE_SUFFIX
 from easybuild.tools.module_naming_scheme.utilities import avail_module_naming_schemes, det_full_ec_version
 from easybuild.tools.module_naming_scheme.utilities import det_hidden_modname, is_valid_module_name
 from easybuild.tools.modules import modules_tool
 from easybuild.tools.py2vs3 import OrderedDict, create_base_metaclass, string_type
-from easybuild.tools.systemtools import check_os_dependency, get_cpu_architecture
+from easybuild.tools.systemtools import check_os_dependency, pick_dep_version
 from easybuild.tools.toolchain.toolchain import SYSTEM_TOOLCHAIN_NAME, is_system_toolchain
 from easybuild.tools.toolchain.toolchain import TOOLCHAIN_CAPABILITIES, TOOLCHAIN_CAPABILITY_CUDA
 from easybuild.tools.toolchain.utilities import get_toolchain, search_toolchain
@@ -102,10 +107,12 @@ except ImportError as err:
 
 _easyconfig_files_cache = {}
 _easyconfigs_cache = {}
+_path_indexes = {}
 
 
 def handle_deprecated_or_replaced_easyconfig_parameters(ec_method):
     """Decorator to handle deprecated/replaced easyconfig parameters."""
+
     def new_ec_method(self, key, *args, **kwargs):
         """Check whether any replace easyconfig parameters are still used"""
         # map deprecated parameters to their replacements, issue deprecation warning(/error)
@@ -378,6 +385,23 @@ def get_toolchain_hierarchy(parent_toolchain, incl_capabilities=False):
     return toolchain_hierarchy
 
 
+@contextmanager
+def disable_templating(ec):
+    """Temporarily disable templating on the given EasyConfig
+
+    Usage:
+        with disable_templating(ec):
+            # Do what you want without templating
+        # Templating set to previous value
+    """
+    old_enable_templating = ec.enable_templating
+    ec.enable_templating = False
+    try:
+        yield old_enable_templating
+    finally:
+        ec.enable_templating = old_enable_templating
+
+
 class EasyConfig(object):
     """
     Class which handles loading, reading, validation of easyconfigs
@@ -410,7 +434,7 @@ class EasyConfig(object):
         if rawtxt is None:
             self.path = path
             self.rawtxt = read_file(path)
-            self.log.debug("Raw contents from supplied easyconfig file %s: %s" % (path, self.rawtxt))
+            self.log.debug("Raw contents from supplied easyconfig file %s: %s", path, self.rawtxt)
         else:
             self.rawtxt = rawtxt
             self.log.debug("Supplied raw easyconfig contents: %s" % self.rawtxt)
@@ -547,26 +571,58 @@ class EasyConfig(object):
         if self.path:
             ec.path = self.path
 
+        # also copy template values, since re-generating them may not give the same set of template values straight away
+        ec.template_values = copy.deepcopy(self.template_values)
+
         return ec
 
     def update(self, key, value, allow_duplicate=True):
         """
-        Update a string configuration value with a value (i.e. append to it).
+        Update an easyconfig parameter with the specified value (i.e. append to it).
+        Note: For dictionary easyconfig parameters, 'allow_duplicate' is ignored (since it's meaningless).
         """
-        prev_value = self[key]
-        if isinstance(prev_value, string_type):
-            if allow_duplicate or value not in prev_value:
-                self[key] = '%s %s ' % (prev_value, value)
-        elif isinstance(prev_value, list):
-            if allow_duplicate:
-                self[key] = prev_value + value
-            else:
-                for item in value:
-                    # add only those items that aren't already in the list
-                    if item not in prev_value:
-                        self[key] = prev_value + [item]
+        if isinstance(value, string_type):
+            inval = [value]
+        elif isinstance(value, (list, dict, tuple)):
+            inval = value
         else:
-            raise EasyBuildError("Can't update configuration value for %s, because it's not a string or list.", key)
+            msg = "Can't update configuration value for %s, because the attempted"
+            msg += " update value, '%s', is not a string, list, tuple or dictionary."
+            raise EasyBuildError(msg, key, value)
+
+        # For easyconfig parameters that are dictionaries, input value must also be a dictionary
+        if isinstance(self[key], dict) and not isinstance(value, dict):
+            msg = "Can't update configuration value for %s, because the attempted"
+            msg += "update value (%s), is not a dictionary (type: %s)."
+            raise EasyBuildError(msg, key, value, type(value))
+
+        # Grab current parameter value so we can modify it
+        param_value = copy.deepcopy(self[key])
+
+        if isinstance(param_value, string_type):
+            for item in inval:
+                # re.search: only add value to string if it's not there yet (surrounded by whitespace)
+                if allow_duplicate or (not re.search(r'(^|\s+)%s(\s+|$)' % re.escape(item), param_value)):
+                    param_value = param_value + ' %s ' % item
+
+        elif isinstance(param_value, (list, tuple)):
+            # make sure we have a list value so we can just append to it
+            param_value = list(param_value)
+            for item in inval:
+                if allow_duplicate or item not in param_value:
+                    param_value.append(item)
+            # cast back to tuple if original value was a tuple
+            if isinstance(self[key], tuple):
+                param_value = tuple(param_value)
+
+        elif isinstance(param_value, dict):
+            param_value.update(inval)
+        else:
+            msg = "Can't update configuration value for %s, because it's not a string, list, tuple or dictionary."
+            raise EasyBuildError(msg, key)
+
+        # Overwrite easyconfig parameter value with updated value, preserving type
+        self[key] = param_value
 
     def set_keys(self, params):
         """
@@ -578,18 +634,15 @@ class EasyConfig(object):
         """
         # disable templating when setting easyconfig parameters
         # required to avoid problems with values that need more parsing to be done (e.g. dependencies)
-        prev_enable_templating = self.enable_templating
-        self.enable_templating = False
-
-        for key in sorted(params.keys()):
-            # validations are skipped, just set in the config
-            if key in self._config.keys():
-                self[key] = params[key]
-                self.log.info("setting easyconfig parameter %s: value %s (type: %s)", key, self[key], type(self[key]))
-            else:
-                raise EasyBuildError("Unknown easyconfig parameter: %s (value '%s')", key, params[key])
-
-        self.enable_templating = prev_enable_templating
+        with disable_templating(self):
+            for key in sorted(params.keys()):
+                # validations are skipped, just set in the config
+                if key in self._config.keys():
+                    self[key] = params[key]
+                    self.log.info("setting easyconfig parameter %s: value %s (type: %s)",
+                                  key, self[key], type(self[key]))
+                else:
+                    raise EasyBuildError("Unknown easyconfig parameter: %s (value '%s')", key, params[key])
 
     def parse(self):
         """
@@ -606,20 +659,20 @@ class EasyConfig(object):
                                  type(self.build_specs))
         self.log.debug("Obtained specs dict %s" % arg_specs)
 
-        self.log.info("Parsing easyconfig file %s with rawcontent: %s" % (self.path, self.rawtxt))
+        self.log.info("Parsing easyconfig file %s with rawcontent: %s", self.path, self.rawtxt)
         self.parser.set_specifications(arg_specs)
-        local_vars = self.parser.get_config_dict()
-        self.log.debug("Parsed easyconfig as a dictionary: %s" % local_vars)
+        ec_vars = self.parser.get_config_dict()
+        self.log.debug("Parsed easyconfig as a dictionary: %s" % ec_vars)
 
         # make sure all mandatory parameters are defined
         # this includes both generic mandatory parameters and software-specific parameters defined via extra_options
-        missing_mandatory_keys = [key for key in self.mandatory if key not in local_vars]
+        missing_mandatory_keys = [key for key in self.mandatory if key not in ec_vars]
         if missing_mandatory_keys:
             raise EasyBuildError("mandatory parameters not provided in %s: %s", self.path, missing_mandatory_keys)
 
-        # provide suggestions for typos
+        # provide suggestions for typos. Local variable names are excluded from this check
         possible_typos = [(key, difflib.get_close_matches(key.lower(), self._config.keys(), 1, 0.85))
-                          for key in local_vars if key not in self]
+                          for key in ec_vars if not is_local_var_name(key) and key not in self]
 
         typos = [(key, guesses[0]) for (key, guesses) in possible_typos if len(guesses) == 1]
         if typos:
@@ -627,48 +680,45 @@ class EasyConfig(object):
                                  ', '.join(["%s -> %s" % typo for typo in typos]))
 
         # set keys in current EasyConfig instance based on dict obtained by parsing easyconfig file
-        known_ec_params, self.unknown_keys = triage_easyconfig_params(local_vars, self._config)
+        known_ec_params, self.unknown_keys = triage_easyconfig_params(ec_vars, self._config)
 
         self.set_keys(known_ec_params)
 
         # templating is disabled when parse_hook is called to allow for easy updating of mutable easyconfig parameters
         # (see also comment in resolve_template)
-        prev_enable_templating = self.enable_templating
-        self.enable_templating = False
+        with disable_templating(self):
+            # if any lists of dependency versions are specified over which we should iterate,
+            # deal with them now, before calling parse hook, parsing of dependencies & iterative easyconfig parameters
+            self.handle_multi_deps()
 
-        # if any lists of dependency versions are specified over which we should iterate,
-        # deal with them now, before calling parse hook, parsing of dependencies & iterative easyconfig parameters...
-        self.handle_multi_deps()
+            parse_hook_msg = None
+            if self.path:
+                parse_hook_msg = "Running %s hook for %s..." % (PARSE, os.path.basename(self.path))
 
-        parse_hook_msg = None
-        if self.path:
-            parse_hook_msg = "Running %s hook for %s..." % (PARSE, os.path.basename(self.path))
+            # trigger parse hook
+            hooks = load_hooks(build_option('hooks'))
+            run_hook(PARSE, hooks, args=[self], msg=parse_hook_msg)
 
-        # trigger parse hook
-        hooks = load_hooks(build_option('hooks'))
-        run_hook(PARSE, hooks, args=[self], msg=parse_hook_msg)
+            # parse dependency specifications
+            # it's important that templating is still disabled at this stage!
+            self.log.info("Parsing dependency specifications...")
+            self['dependencies'] = [self._parse_dependency(dep) for dep in self['dependencies']]
+            self['hiddendependencies'] = [
+                self._parse_dependency(dep, hidden=True) for dep in self['hiddendependencies']
+            ]
 
-        # parse dependency specifications
-        # it's important that templating is still disabled at this stage!
-        self.log.info("Parsing dependency specifications...")
-        self['dependencies'] = [self._parse_dependency(dep) for dep in self['dependencies']]
-        self['hiddendependencies'] = [self._parse_dependency(dep, hidden=True) for dep in self['hiddendependencies']]
+            # need to take into account that builddependencies may need to be iterated over,
+            # i.e. when the value is a list of lists of tuples
+            builddeps = self['builddependencies']
+            if builddeps and all(isinstance(x, (list, tuple)) for b in builddeps for x in b):
+                self.iterate_options.append('builddependencies')
+                builddeps = [[self._parse_dependency(dep, build_only=True) for dep in x] for x in builddeps]
+            else:
+                builddeps = [self._parse_dependency(dep, build_only=True) for dep in builddeps]
+            self['builddependencies'] = builddeps
 
-        # need to take into account that builddependencies may need to be iterated over,
-        # i.e. when the value is a list of lists of tuples
-        builddeps = self['builddependencies']
-        if builddeps and all(isinstance(x, (list, tuple)) for b in builddeps for x in b):
-            self.iterate_options.append('builddependencies')
-            builddeps = [[self._parse_dependency(dep, build_only=True) for dep in x] for x in builddeps]
-        else:
-            builddeps = [self._parse_dependency(dep, build_only=True) for dep in builddeps]
-        self['builddependencies'] = builddeps
-
-        # keep track of parsed multi deps, they'll come in handy during sanity check & module steps...
-        self.multi_deps = self.get_parsed_multi_deps()
-
-        # restore templating
-        self.enable_templating = prev_enable_templating
+            # keep track of parsed multi deps, they'll come in handy during sanity check & module steps...
+            self.multi_deps = self.get_parsed_multi_deps()
 
         # update templating dictionary
         self.generate_template_values()
@@ -816,16 +866,17 @@ class EasyConfig(object):
         for opt in ITERATE_OPTIONS:
 
             # only when builddependencies is a list of lists are we iterating over them
-            if opt == 'builddependencies' and not all(isinstance(e, list) for e in self[opt]):
+            if opt == 'builddependencies' and not all(isinstance(e, list) for e in self.get_ref(opt)):
                 continue
 
+            opt_value = self.get(opt, None, resolve=False)
             # anticipate changes in available easyconfig parameters (e.g. makeopts -> buildopts?)
-            if self.get(opt, None) is None:
+            if opt_value is None:
                 raise EasyBuildError("%s not available in self.cfg (anymore)?!", opt)
 
             # keep track of list, supply first element as first option to handle
-            if isinstance(self[opt], (list, tuple)):
-                opt_counts.append((opt, len(self[opt])))
+            if isinstance(opt_value, (list, tuple)):
+                opt_counts.append((opt, len(opt_value)))
 
         # make sure that options that specify lists have the same length
         list_opt_lengths = [length for (opt, length) in opt_counts if length > 1]
@@ -1086,60 +1137,64 @@ class EasyConfig(object):
 
         return self._all_dependencies
 
-    def dump(self, fp, always_overwrite=True, backup=False):
+    def dump(self, fp, always_overwrite=True, backup=False, explicit_toolchains=False):
         """
         Dump this easyconfig to file, with the given filename.
 
         :param always_overwrite: overwrite existing file at specified location without use of --force
         :param backup: create backup of existing file before overwriting it
         """
-        orig_enable_templating = self.enable_templating
-
         # templated values should be dumped unresolved
-        self.enable_templating = False
+        with disable_templating(self):
+            # build dict of default values
+            default_values = dict([(key, DEFAULT_CONFIG[key][0]) for key in DEFAULT_CONFIG])
+            default_values.update(dict([(key, self.extra_options[key][0]) for key in self.extra_options]))
 
-        # build dict of default values
-        default_values = dict([(key, DEFAULT_CONFIG[key][0]) for key in DEFAULT_CONFIG])
-        default_values.update(dict([(key, self.extra_options[key][0]) for key in self.extra_options]))
+            self.generate_template_values()
+            templ_const = dict([(quote_py_str(const[1]), const[0]) for const in TEMPLATE_CONSTANTS])
 
-        self.generate_template_values()
-        templ_const = dict([(quote_py_str(const[1]), const[0]) for const in TEMPLATE_CONSTANTS])
+            # create reverse map of templates, to inject template values where possible
+            # longer template values are considered first, shorter template keys get preference over longer ones
+            sorted_keys = sorted(self.template_values, key=lambda k: (len(self.template_values[k]), -len(k)),
+                                 reverse=True)
+            templ_val = OrderedDict([])
+            for key in sorted_keys:
+                # shortest template 'key' is retained in case of duplicates
+                # ('namelower' is preferred over 'github_account')
+                # only template values longer than 2 characters are retained
+                if self.template_values[key] not in templ_val and len(self.template_values[key]) > 2:
+                    templ_val[self.template_values[key]] = key
 
-        # create reverse map of templates, to inject template values where possible
-        # longer template values are considered first, shorter template keys get preference over longer ones
-        sorted_keys = sorted(self.template_values, key=lambda k: (len(self.template_values[k]), -len(k)), reverse=True)
-        templ_val = OrderedDict([])
-        for key in sorted_keys:
-            # shortest template 'key' is retained in case of duplicates ('namelower' is preferred over 'github_account')
-            # only template values longer than 2 characters are retained
-            if self.template_values[key] not in templ_val and len(self.template_values[key]) > 2:
-                templ_val[self.template_values[key]] = key
+            toolchain_hierarchy = None
+            if not explicit_toolchains:
+                try:
+                    toolchain_hierarchy = get_toolchain_hierarchy(self['toolchain'])
+                except EasyBuildError as err:
+                    # don't fail hard just because we can't get the hierarchy
+                    self.log.warning('Could not generate toolchain hierarchy for %s to use in easyconfig dump method, '
+                                     'error:\n%s', self['toolchain'], str(err))
 
-        try:
-            ectxt = self.parser.dump(self, default_values, templ_const, templ_val)
-        except NotImplementedError as err:
-            # need to restore enable_templating value in case this method is caught in a try/except block and ignored
-            # (the ability to dump is not a hard requirement for build success)
-            self.enable_templating = orig_enable_templating
-            raise NotImplementedError(err)
+            try:
+                ectxt = self.parser.dump(self, default_values, templ_const, templ_val,
+                                         toolchain_hierarchy=toolchain_hierarchy)
+            except NotImplementedError as err:
+                raise NotImplementedError(err)
 
-        self.log.debug("Dumped easyconfig: %s", ectxt)
+            self.log.debug("Dumped easyconfig: %s", ectxt)
 
-        if build_option('dump_autopep8'):
-            autopep8_opts = {
-                'aggressive': 1,  # enable non-whitespace changes, but don't be too aggressive
-                'max_line_length': 120,
-            }
-            self.log.info("Reformatting dumped easyconfig using autopep8 (options: %s)", autopep8_opts)
-            ectxt = autopep8.fix_code(ectxt, options=autopep8_opts)
-            self.log.debug("Dumped easyconfig after autopep8 reformatting: %s", ectxt)
+            if build_option('dump_autopep8'):
+                autopep8_opts = {
+                    'aggressive': 1,  # enable non-whitespace changes, but don't be too aggressive
+                    'max_line_length': 120,
+                }
+                self.log.info("Reformatting dumped easyconfig using autopep8 (options: %s)", autopep8_opts)
+                ectxt = autopep8.fix_code(ectxt, options=autopep8_opts)
+                self.log.debug("Dumped easyconfig after autopep8 reformatting: %s", ectxt)
 
-        if not ectxt.endswith('\n'):
-            ectxt += '\n'
+            if not ectxt.endswith('\n'):
+                ectxt += '\n'
 
-        write_file(fp, ectxt, always_overwrite=always_overwrite, backup=backup, verbose=backup)
-
-        self.enable_templating = orig_enable_templating
+            write_file(fp, ectxt, always_overwrite=always_overwrite, backup=backup, verbose=backup)
 
     def _validate(self, attr, values):  # private method
         """
@@ -1151,20 +1206,143 @@ class EasyConfig(object):
         if self[attr] and self[attr] not in values:
             raise EasyBuildError("%s provided '%s' is not valid: %s", attr, self[attr], values)
 
-    def handle_external_module_metadata(self, dep_name):
+    def probe_external_module_metadata(self, mod_name, existing_metadata=None):
         """
-        helper function for _parse_dependency
-        handles metadata for external module dependencies
-        """
-        dependency = {}
-        if dep_name in self.external_modules_metadata:
-            dependency['external_module_metadata'] = self.external_modules_metadata[dep_name]
-            self.log.info("Updated dependency info with available metadata for external module %s: %s",
-                          dep_name, dependency['external_module_metadata'])
-        else:
-            self.log.info("No metadata available for external module %s", dep_name)
+        Helper function for handle_external_module_metadata.
 
-        return dependency
+        Tries to determine metadata for external module when there is not entry in the metadata file,
+        by looking at the variables defined by the module file.
+
+        This is mainly intended for modules provided in the Cray Programming Environment,
+        but it could also be useful in other contexts.
+
+        The following pairs of variables are considered (in order, first hit wins),
+        where 'XXX' is the software name in capitals:
+          1. $CRAY_XXX_PREFIX and $CRAY_XXX_VERSION
+          1. $CRAY_XXX_PREFIX_DIR and $CRAY_XXX_VERSION
+          2. $CRAY_XXX_DIR and $CRAY_XXX_VERSION
+          2. $CRAY_XXX_ROOT and $CRAY_XXX_VERSION
+          5. $XXX_PREFIX and $XXX_VERSION
+          4. $XXX_DIR and $XXX_VERSION
+          5. $XXX_ROOT and $XXX_VERSION
+          3. $XXX_HOME and $XXX_VERSION
+
+        If none of the pairs is found, then an empty dictionary is returned.
+
+        :param mod_name: name of the external module
+        :param metadata: already available metadata for this external module (if any)
+        """
+        res = {}
+
+        if existing_metadata is None:
+            existing_metadata = {}
+
+        soft_name = existing_metadata.get('name')
+        if soft_name:
+            # software name is a list of names in metadata, just grab first one
+            soft_name = soft_name[0]
+        else:
+            # if the software name is not known yet, use the first part of the module name as software name,
+            # but strip off the leading 'cray-' part first (examples: cray-netcdf/4.6.1.3,  cray-fftw/3.3.8.2)
+            soft_name = mod_name.split('/')[0]
+
+            cray_prefix = 'cray-'
+            if soft_name.startswith(cray_prefix):
+                soft_name = soft_name[len(cray_prefix):]
+
+        # determine software name to use in names of environment variables (upper case, '-' becomes '_')
+        soft_name_env_var_infix = convert_name(soft_name.replace('-', '_'), upper=True)
+
+        var_name_pairs_templates = [
+            ('CRAY_%s_PREFIX', 'CRAY_%s_VERSION'),
+            ('CRAY_%s_PREFIX_DIR', 'CRAY_%s_VERSION'),
+            ('CRAY_%s_DIR', 'CRAY_%s_VERSION'),
+            ('CRAY_%s_ROOT', 'CRAY_%s_VERSION'),
+            ('%s_PREFIX', '%s_VERSION'),
+            ('%s_DIR', '%s_VERSION'),
+            ('%s_ROOT', '%s_VERSION'),
+            ('%s_HOME', '%s_VERSION'),
+        ]
+
+        def mk_var_name_pair(var_name_pair, name):
+            """Complete variable name pair template using provided name."""
+            return (var_name_pair[0] % name, var_name_pair[1] % name)
+
+        var_name_pairs = [mk_var_name_pair(x, soft_name_env_var_infix) for x in var_name_pairs_templates]
+
+        # also consider name based on module name for environment variables to check
+        # for example, for the cray-netcdf-hdf5parallel module we should also check $CRAY_NETCDF_HDF5PARALLEL_VERSION
+        mod_name_env_var_infix = convert_name(mod_name.split('/')[0].replace('-', '_'), upper=True)
+
+        if mod_name_env_var_infix != soft_name_env_var_infix:
+            var_name_pairs.extend([mk_var_name_pair(x, mod_name_env_var_infix) for x in var_name_pairs_templates])
+
+        for prefix_var_name, version_var_name in var_name_pairs:
+            prefix = self.modules_tool.get_setenv_value_from_modulefile(mod_name, prefix_var_name)
+            version = self.modules_tool.get_setenv_value_from_modulefile(mod_name, version_var_name)
+
+            # we only have a hit when values for *both* variables are found
+            if prefix and version:
+
+                if 'name' not in existing_metadata:
+                    res['name'] = [soft_name]
+
+                # if a version is already set in the available metadata, we retain it
+                if 'version' not in existing_metadata:
+                    res['version'] = [version]
+                    self.log.info('setting external module %s version to be %s', mod_name, version)
+
+                # if a prefix is already set in the available metadata, we retain it
+                if 'prefix' not in existing_metadata:
+                    res['prefix'] = prefix
+                    self.log.info('setting external module %s prefix to be %s', mod_name, prefix_var_name)
+                break
+
+        return res
+
+    def handle_external_module_metadata(self, mod_name):
+        """
+        Helper function for _parse_dependency; collects metadata for external module dependencies.
+
+        :param mod_name: name of external module to collect metadata for
+        """
+        partial_mod_name = mod_name.split('/')[0]
+
+        # check whether existing metadata for external modules already has metadata for this module;
+        # first using full module name (as it is provided), for example 'cray-netcdf/4.6.1.3',
+        # then with partial module name, for example 'cray-netcdf'
+        metadata = self.external_modules_metadata.get(mod_name, {})
+        self.log.info("Available metadata for external module %s: %s", mod_name, metadata)
+
+        partial_mod_name_metadata = self.external_modules_metadata.get(partial_mod_name, {})
+        self.log.info("Available metadata for external module using partial module name %s: %s",
+                      partial_mod_name, partial_mod_name_metadata)
+
+        for key in partial_mod_name_metadata:
+            if key not in metadata:
+                metadata[key] = partial_mod_name_metadata[key]
+
+        self.log.info("Combined available metadata for external module %s: %s", mod_name, metadata)
+
+        # if not all metadata is available (name/version/prefix), probe external module to collect more metadata;
+        # first with full module name, and then with partial module name if first probe didn't return anything;
+        # note: result of probe_external_module_metadata only contains metadata for keys that were not set yet
+        if not all(key in metadata for key in ['name', 'prefix', 'version']):
+            self.log.info("Not all metadata found yet for external module %s, probing module...", mod_name)
+            probed_metadata = self.probe_external_module_metadata(mod_name, existing_metadata=metadata)
+            if probed_metadata:
+                self.log.info("Extra metadata found by probing external module %s: %s", mod_name, probed_metadata)
+                metadata.update(probed_metadata)
+            else:
+                self.log.info("No extra metadata found by probing %s, trying with partial module name...", mod_name)
+                probed_metadata = self.probe_external_module_metadata(partial_mod_name, existing_metadata=metadata)
+                self.log.info("Extra metadata for external module %s found by probing partial module name %s: %s",
+                              mod_name, partial_mod_name, probed_metadata)
+                metadata.update(probed_metadata)
+
+            self.log.info("Obtained metadata after module probing: %s", metadata)
+
+        return {'external_module_metadata': metadata}
 
     def handle_multi_deps(self):
         """
@@ -1230,31 +1408,6 @@ class EasyConfig(object):
                 raise EasyBuildError(error_msg, builddeps)
 
         return multi_deps
-
-    def find_dep_version_match(self, dep_version):
-        """Identify the correct version for this system from the choices provided. This returns the version to use."""
-        if isinstance(dep_version, string_type):
-            self.log.debug("Version is already a string ('%s'), OK", dep_version)
-            return dep_version
-        elif dep_version is None:
-            self.log.debug("Version is None, OK")
-            return None
-        elif isinstance(dep_version, dict):
-            # figure out matches based on dict keys (after splitting on '=')
-            my_arch_key = 'arch=%s' % get_cpu_architecture()
-            arch_keys = [x for x in dep_version.keys() if x.startswith('arch=')]
-            other_keys = [x for x in dep_version.keys() if x not in arch_keys]
-            if other_keys:
-                raise EasyBuildError("Unexpected keys in version: %s. Only 'arch=' keys are supported", other_keys)
-            if arch_keys:
-                if my_arch_key in dep_version:
-                    ver = dep_version[my_arch_key]
-                    self.log.info("Version selected from %s using key %s: %s", dep_version, my_arch_key, ver)
-                    return ver
-                else:
-                    raise EasyBuildError("No matches for version in %s (looking for %s)", dep_version, my_arch_key)
-
-        raise EasyBuildError("Unknown value type for version: %s", dep_version)
 
     # private method
     def _parse_dependency(self, dep, hidden=False, build_only=False):
@@ -1337,7 +1490,7 @@ class EasyConfig(object):
             raise EasyBuildError("Dependency %s of unsupported type: %s", dep, type(dep))
 
         # Find the version to use on this system
-        dependency['version'] = self.find_dep_version_match(dependency['version'])
+        dependency['version'] = pick_dep_version(dependency['version'])
 
         if dependency['external_module']:
             # check whether the external module is hidden
@@ -1360,7 +1513,7 @@ class EasyConfig(object):
 
         # (true) boolean value simply indicates that a system toolchain is used
         elif isinstance(tc_spec, bool) and tc_spec:
-                tc = {'name': SYSTEM_TOOLCHAIN_NAME, 'version': ''}
+            tc = {'name': SYSTEM_TOOLCHAIN_NAME, 'version': ''}
 
         # two-element list/tuple value indicates custom toolchain specification
         elif isinstance(tc_spec, (list, tuple,)):
@@ -1454,6 +1607,7 @@ class EasyConfig(object):
     def generate_template_values(self):
         """Try to generate all template values."""
 
+        self.log.info("Generating template values...")
         self._generate_template_values()
 
         # recursive call, until there are no more changes to template values;
@@ -1472,20 +1626,31 @@ class EasyConfig(object):
                     # KeyError's may occur when not all templates are defined yet, but these are safe to ignore
                     pass
 
+        self.log.info("Template values: %s", ', '.join("%s='%s'" % x for x in sorted(self.template_values.items())))
+
     def _generate_template_values(self, ignore=None):
         """Actual code to generate the template values"""
-        if self.template_values is None:
-            self.template_values = {}
 
         # step 0. self.template_values can/should be updated from outside easyconfig
-        # (eg the run_setp code in EasyBlock)
+        # (eg the run_step code in EasyBlock)
 
         # step 1-3 work with easyconfig.templates constants
         # disable templating with creating dict with template values to avoid looping back to here via __getitem__
-        prev_enable_templating = self.enable_templating
-        self.enable_templating = False
-        template_values = template_constant_dict(self, ignore=ignore)
-        self.enable_templating = prev_enable_templating
+        with disable_templating(self):
+            if self.template_values is None:
+                # if no template values are set yet, initiate with a minimal set of template values;
+                # this is important for easyconfig that use %(version_minor)s to define 'toolchain',
+                # which is a pretty weird use case, but fine...
+                self.template_values = template_constant_dict(self, ignore=ignore)
+
+        # grab toolchain instance with templating support enabled,
+        # which is important in case the Toolchain instance was not created yet
+        toolchain = self.toolchain
+
+        # get updated set of template values, now with toolchain instance
+        # (which is used to define the %(mpi_cmd_prefix)s template)
+        with disable_templating(self):
+            template_values = template_constant_dict(self, ignore=ignore, toolchain=toolchain)
 
         # update the template_values dict
         self.template_values.update(template_values)
@@ -1528,13 +1693,8 @@ class EasyConfig(object):
         # see also comments in resolve_template
 
         # temporarily disable templating
-        prev_enable_templating = self.enable_templating
-        self.enable_templating = False
-
-        ref = self[key]
-
-        # restore previous value for 'enable_templating'
-        self.enable_templating = prev_enable_templating
+        with disable_templating(self):
+            ref = self[key]
 
         return ref
 
@@ -1548,12 +1708,13 @@ class EasyConfig(object):
                                  key, value)
 
     @handle_deprecated_or_replaced_easyconfig_parameters
-    def get(self, key, default=None):
+    def get(self, key, default=None, resolve=True):
         """
         Gets the value of a key in the config, with 'default' as fallback.
+        :param resolve: if False, disables templating via calling get_ref, else resolves template values
         """
         if key in self:
-            return self[key]
+            return self[key] if resolve else self.get_ref(key)
         else:
             return default
 
@@ -1695,8 +1856,8 @@ def get_easyblock_class(easyblock, name=None, error_on_failed_import=True, error
 
 def is_generic_easyblock(easyblock):
     """Return whether specified easyblock name is a generic easyblock or not."""
-
-    return easyblock and not easyblock.startswith(EASYBLOCK_CLASS_PREFIX)
+    _log.deprecated("is_generic_easyblock function was moved to easybuild.tools.filetools", '5.0')
+    return filetools.is_generic_easyblock(easyblock)
 
 
 def get_module_path(name, generic=None, decode=True):
@@ -1711,7 +1872,7 @@ def get_module_path(name, generic=None, decode=True):
         return None
 
     if generic is None:
-        generic = is_generic_easyblock(name)
+        generic = filetools.is_generic_easyblock(name)
 
     # example: 'EB_VSC_minus_tools' should result in 'vsc_tools'
     if decode:
@@ -1720,7 +1881,7 @@ def get_module_path(name, generic=None, decode=True):
 
     modpath = ['easybuild', 'easyblocks']
     if generic:
-        modpath.append('generic')
+        modpath.append(GENERIC_EASYBLOCK_PKG)
 
     return '.'.join(modpath + [module_name])
 
@@ -1913,10 +2074,29 @@ def robot_find_easyconfig(name, version):
 
     res = None
     for path in paths:
+
+        if build_option('ignore_index'):
+            _log.info("Ignoring index for %s...", path)
+            path_index = []
+        elif path in _path_indexes:
+            path_index = _path_indexes[path]
+            _log.info("Found loaded index for %s", path)
+        elif os.path.exists(path):
+            path_index = load_index(path)
+            if path_index is None:
+                _log.info("No index found for %s, so creating it...", path)
+                path_index = create_index(path)
+            else:
+                _log.info("Loaded index for %s", path)
+
+            _path_indexes[path] = path_index
+        else:
+            path_index = []
+
         easyconfigs_paths = create_paths(path, name, version)
         for easyconfig_path in easyconfigs_paths:
             _log.debug("Checking easyconfig path %s" % easyconfig_path)
-            if os.path.isfile(easyconfig_path):
+            if easyconfig_path in path_index or os.path.isfile(easyconfig_path):
                 _log.debug("Found easyconfig file for name %s, version %s at %s" % (name, version, easyconfig_path))
                 _easyconfig_files_cache[key] = os.path.abspath(easyconfig_path)
                 res = _easyconfig_files_cache[key]

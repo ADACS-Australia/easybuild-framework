@@ -1,5 +1,5 @@
 # #
-# Copyright 2015-2019 Ghent University
+# Copyright 2015-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -36,8 +36,9 @@ from test.framework.utilities import EnhancedTestCase, TestLoaderFiltered
 from unittest import TextTestRunner
 
 from easybuild.base.fancylogger import getLogger, logToFile, setLogFormat
-from easybuild.tools.build_log import LOGGING_FORMAT, EasyBuildError, EasyBuildLog, dry_run_msg, dry_run_warning
-from easybuild.tools.build_log import init_logging, print_error, print_msg, print_warning, stop_logging, time_str_since
+from easybuild.tools.build_log import (
+    LOGGING_FORMAT, EasyBuildError, EasyBuildLog, dry_run_msg, dry_run_warning, init_logging, print_error, print_msg,
+    print_warning, stop_logging, time_str_since, raise_nosupport)
 from easybuild.tools.filetools import read_file, write_file
 
 
@@ -68,7 +69,7 @@ class BuildLogTest(EnhancedTestCase):
         self.assertErrorRegex(EasyBuildError, 'BOOM', raise_easybuilderror, 'BOOM')
         logToFile(tmplog, enable=False)
 
-        log_re = re.compile("^root ::.* BOOM \(at .*:[0-9]+ in [a-z_]+\)$", re.M)
+        log_re = re.compile(r"^fancyroot ::.* BOOM \(at .*:[0-9]+ in [a-z_]+\)$", re.M)
         logtxt = open(tmplog, 'r').read()
         self.assertTrue(log_re.match(logtxt), "%s matches %s" % (log_re.pattern, logtxt))
 
@@ -131,24 +132,25 @@ class BuildLogTest(EnhancedTestCase):
         logtxt = read_file(tmplog)
 
         expected_logtxt = '\n'.join([
-            r"root.test_easybuildlog \[DEBUG\] :: 123 debug",
-            r"root.test_easybuildlog \[INFO\] :: foobar info",
-            r"root.test_easybuildlog \[WARNING\] :: justawarning",
-            r"root.test_easybuildlog \[WARNING\] :: Deprecated functionality.*anotherwarning.*",
-            r"root.test_easybuildlog \[WARNING\] :: Deprecated functionality.*onemorewarning.*",
-            r"root.test_easybuildlog \[WARNING\] :: Deprecated functionality.*lastwarning.*",
-            r"root.test_easybuildlog \[WARNING\] :: Deprecated functionality.*thisisnotprinted.*",
-            r"root.test_easybuildlog \[ERROR\] :: EasyBuild crashed with an error \(at .* in .*\): kaput",
-            r"root.test_easybuildlog \[ERROR\] :: EasyBuild crashed with an error \(at .* in .*\): err: msg: %s",
-            r"root.test_easybuildlog \[ERROR\] :: .*EasyBuild encountered an exception \(at .* in .*\): oops",
+            r"fancyroot.test_easybuildlog \[DEBUG\] :: 123 debug",
+            r"fancyroot.test_easybuildlog \[INFO\] :: foobar info",
+            r"fancyroot.test_easybuildlog \[WARNING\] :: justawarning",
+            r"fancyroot.test_easybuildlog \[WARNING\] :: Deprecated functionality.*anotherwarning.*",
+            r"fancyroot.test_easybuildlog \[WARNING\] :: Deprecated functionality.*onemorewarning.*",
+            r"fancyroot.test_easybuildlog \[WARNING\] :: Deprecated functionality.*lastwarning.*",
+            r"fancyroot.test_easybuildlog \[WARNING\] :: Deprecated functionality.*thisisnotprinted.*",
+            r"fancyroot.test_easybuildlog \[ERROR\] :: EasyBuild crashed with an error \(at .* in .*\): kaput",
+            r"fancyroot.test_easybuildlog \[ERROR\] :: EasyBuild crashed with an error \(at .* in .*\): err: msg: %s",
+            r"fancyroot.test_easybuildlog \[ERROR\] :: .*EasyBuild encountered an exception \(at .* in .*\): oops",
             '',
         ])
         logtxt_regex = re.compile(r'^%s' % expected_logtxt, re.M)
         self.assertTrue(logtxt_regex.search(logtxt), "Pattern '%s' found in %s" % (logtxt_regex.pattern, logtxt))
 
-        self.assertErrorRegex(EasyBuildError, "DEPRECATED \(since .*: kaput", log.deprecated, "kaput", older_ver)
-        self.assertErrorRegex(EasyBuildError, "DEPRECATED \(since .*: 2>1", log.deprecated, "2>1", '2.0', '1.0')
-        self.assertErrorRegex(EasyBuildError, "DEPRECATED \(since .*: 2>1", log.deprecated, "2>1", '2.0', max_ver='1.0')
+        self.assertErrorRegex(EasyBuildError, r"DEPRECATED \(since .*: kaput", log.deprecated, "kaput", older_ver)
+        self.assertErrorRegex(EasyBuildError, r"DEPRECATED \(since .*: 2>1", log.deprecated, "2>1", '2.0', '1.0')
+        self.assertErrorRegex(EasyBuildError, r"DEPRECATED \(since .*: 2>1", log.deprecated, "2>1", '2.0',
+                              max_ver='1.0')
 
         # wipe log so we can reuse it
         write_file(tmplog, '')
@@ -163,10 +165,10 @@ class BuildLogTest(EnhancedTestCase):
         logToFile(tmplog, enable=False)
         logtxt = read_file(tmplog)
         expected_logtxt = '\n'.join([
-            r"root.test_easybuildlog \[WARNING\] :: bleh",
-            r"root.test_easybuildlog \[INFO\] :: 4\+2 = 42",
-            r"root.test_easybuildlog \[DEBUG\] :: this is just a test",
-            r"root.test_easybuildlog \[ERROR\] :: EasyBuild crashed with an error \(at .* in .*\): foo baz baz",
+            r"fancyroot.test_easybuildlog \[WARNING\] :: bleh",
+            r"fancyroot.test_easybuildlog \[INFO\] :: 4\+2 = 42",
+            r"fancyroot.test_easybuildlog \[DEBUG\] :: this is just a test",
+            r"fancyroot.test_easybuildlog \[ERROR\] :: EasyBuild crashed with an error \(at .* in .*\): foo baz baz",
             '',
         ])
         logtxt_regex = re.compile(r'^%s' % expected_logtxt, re.M)
@@ -215,7 +217,7 @@ class BuildLogTest(EnhancedTestCase):
         logToFile(tmplog, enable=False)
         logtxt = read_file(tmplog)
 
-        prefix = 'root.test_easybuildlog'
+        prefix = 'fancyroot.test_easybuildlog'
         devel_msg = r"%s \[DEVEL\] :: tmi" % prefix
         debug_msg = r"%s \[DEBUG\] :: gdb" % prefix
         info_msg = r"%s \[INFO\] :: fyi" % prefix
@@ -235,11 +237,11 @@ class BuildLogTest(EnhancedTestCase):
 
     def test_print_warning(self):
         """Test print_warning"""
-        def run_check(args, silent=False, expected_stderr=''):
+        def run_check(args, silent=False, expected_stderr='', **kwargs):
             """Helper function to check stdout/stderr produced via print_warning."""
             self.mock_stderr(True)
             self.mock_stdout(True)
-            print_warning(*args, silent=silent)
+            print_warning(*args, silent=silent, **kwargs)
             stderr = self.get_stderr()
             stdout = self.get_stdout()
             self.mock_stdout(False)
@@ -255,6 +257,14 @@ class BuildLogTest(EnhancedTestCase):
         run_check(['You %s %s %s.', 'have', 'been', 'warned'], silent=True)
 
         self.assertErrorRegex(EasyBuildError, "Unknown named arguments", print_warning, 'foo', unknown_arg='bar')
+
+        # test passing of logger to print_warning
+        tmp_logfile = os.path.join(self.test_prefix, 'test.log')
+        logger, _ = init_logging(tmp_logfile, silent=True)
+        expected = "\nWARNING: Test log message with a logger involved.\n\n"
+        run_check(["Test log message with a logger involved."], expected_stderr=expected, log=logger)
+        log_txt = read_file(tmp_logfile)
+        self.assertTrue("WARNING Test log message with a logger involved." in log_txt)
 
     def test_print_error(self):
         """Test print_error"""
@@ -421,6 +431,10 @@ class BuildLogTest(EnhancedTestCase):
         self.assertTrue(isinstance(log, EasyBuildLog))
 
         stop_logging(logfile, logtostdout=True)
+
+    def test_raise_nosupport(self):
+        self.assertErrorRegex(EasyBuildError, 'NO LONGER SUPPORTED since v42: foobar;',
+                              raise_nosupport, 'foobar', 42)
 
 
 def suite():

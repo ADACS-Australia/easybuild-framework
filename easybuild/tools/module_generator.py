@@ -1,5 +1,5 @@
 # #
-# Copyright 2009-2019 Ghent University
+# Copyright 2009-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -364,6 +364,15 @@ class ModuleGenerator(object):
         """Return given string formatted as a comment."""
         raise NotImplementedError
 
+    def check_version(self, minimal_version_maj, minimal_version_min, minimal_version_patch='0'):
+        """
+        Check the minimal version of the modules tool in the module file
+        :param minimal_version_maj: the major version to check
+        :param minimal_version_min: the minor version to check
+        :param minimal_version_patch: the patch version to check
+        """
+        raise NotImplementedError
+
     def conditional_statement(self, conditions, body, negative=False, else_body=None, indent=True,
                               cond_or=False, cond_tmpl=None):
         """
@@ -515,10 +524,26 @@ class ModuleGenerator(object):
         """
         Generate a string with a comma-separated list of extensions.
         """
-        exts_list = self.app.cfg['exts_list']
+        # We need only name and version, so don't resolve templates
+        exts_list = self.app.cfg.get_ref('exts_list')
         extensions = ', '.join(sorted(['-'.join(ext[:2]) for ext in exts_list], key=str.lower))
 
         return extensions
+
+    def _generate_extensions_list(self):
+        """
+        Generate a list of all extensions in name/version format
+        """
+        exts_list = self.app.cfg['exts_list']
+        # the format is extension_name/extension_version
+        exts_ver_list = []
+        for ext in exts_list:
+            if isinstance(ext, tuple):
+                exts_ver_list.append('%s/%s' % (ext[0], ext[1]))
+            elif isinstance(ext, string_type):
+                exts_ver_list.append(ext)
+
+        return sorted(exts_ver_list, key=str.lower)
 
     def _generate_help_text(self):
         """
@@ -711,7 +736,7 @@ class ModuleGeneratorTcl(ModuleGenerator):
         """
         txt = '\n'.join([
             "proc ModulesHelp { } {",
-            "    puts stderr {%s" % re.sub('([{}\[\]])', r'\\\1', self._generate_help_text()),
+            "    puts stderr {%s" % re.sub(r'([{}\[\]])', r'\\\1', self._generate_help_text()),
             "    }",
             '}',
             '',
@@ -738,7 +763,10 @@ class ModuleGeneratorTcl(ModuleGenerator):
             # - 'conflict Compiler/GCC/4.8.2/OpenMPI' for 'Compiler/GCC/4.8.2/OpenMPI/1.6.4'
             lines.extend(['', "conflict %s" % os.path.dirname(self.app.short_mod_name)])
 
-        whatis_lines = ["module-whatis {%s}" % re.sub('([{}\[\]])', r'\\\1', l) for l in self._generate_whatis_lines()]
+        whatis_lines = [
+            "module-whatis {%s}" % re.sub(r'([{}\[\]])', r'\\\1', line)
+            for line in self._generate_whatis_lines()
+        ]
         txt += '\n'.join([''] + lines + ['']) % {
             'name': self.app.name,
             'version': self.app.version,
@@ -789,7 +817,7 @@ class ModuleGeneratorTcl(ModuleGenerator):
             cond_tmpl = "[ module-info mode remove ] || %s"
 
         if depends_on:
-            if multi_dep_mods:
+            if multi_dep_mods and len(multi_dep_mods) > 1:
                 parent_mod_name = os.path.dirname(mod_name)
                 guard = self.is_loaded(multi_dep_mods[1:])
                 if_body = load_template % {'mod_name': parent_mod_name}
@@ -934,7 +962,12 @@ class ModuleGeneratorTcl(ModuleGenerator):
         :param mod_name_in: name of module to load (swap in)
         :param guarded: guard 'swap' statement, fall back to 'load' if module being swapped out is not loaded
         """
-        body = "module swap %s %s" % (mod_name_out, mod_name_in)
+        # In Modules 4.2.3+ a 2-argument swap 'module swap foo foo/X.Y.Z' will fail as the unloaded 'foo'
+        # means all 'foo' modules conflict and 'foo/X.Y.Z' will not load.  A 1-argument swap like
+        # 'module swap foo/X.Y.Z' will unload any currently loaded 'foo' without it becoming conflicting
+        # and successfully load the new module.
+        # See: https://modules.readthedocs.io/en/latest/NEWS.html#modules-4-2-3-2019-03-23
+        body = "module swap %s" % (mod_name_in)
         if guarded:
             alt_body = self.LOAD_TEMPLATE % {'mod_name': mod_name_in}
             swap_statement = [self.conditional_statement(self.is_loaded(mod_name_out), body, else_body=alt_body)]
@@ -1016,6 +1049,20 @@ class ModuleGeneratorLua(ModuleGenerator):
         if self.modules_tool:
             if self.modules_tool.version and LooseVersion(self.modules_tool.version) >= LooseVersion('7.7.38'):
                 self.DOT_MODULERC = '.modulerc.lua'
+
+    def check_version(self, minimal_version_maj, minimal_version_min, minimal_version_patch='0'):
+        """
+        Check the minimal version of the moduletool in the module file
+        :param minimal_version_maj: the major version to check
+        :param minimal_version_min: the minor version to check
+        :param minimal_version_patch: the patch version to check
+        """
+        lmod_version_check_expr = 'convertToCanonical(LmodVersion()) >= convertToCanonical("%(maj)s.%(min)s.%(patch)s")'
+        return lmod_version_check_expr % {
+            'maj': minimal_version_maj,
+            'min': minimal_version_min,
+            'patch': minimal_version_patch,
+        }
 
     def check_group(self, group, error_msg=None):
         """
@@ -1129,6 +1176,16 @@ class ModuleGeneratorLua(ModuleGenerator):
         for line in self._generate_whatis_lines():
             whatis_lines.append("whatis(%s%s%s)" % (self.START_STR, self.check_str(line), self.END_STR))
 
+        if build_option('module_extensions'):
+            extensions_list = self._generate_extensions_list()
+
+            if extensions_list:
+                extensions_stmt = 'extensions("%s")' % ','.join(['%s' % x for x in extensions_list])
+                # put this behind a Lmod version check as 'extensions' is only (well) supported since Lmod 8.2.8,
+                # see https://lmod.readthedocs.io/en/latest/330_extensions.html#module-extensions and
+                # https://github.com/TACC/Lmod/issues/428
+                lines.extend(['', self.conditional_statement(self.check_version("8", "2", "8"), extensions_stmt)])
+
         txt += '\n'.join([''] + lines + ['']) % {
             'name': self.app.name,
             'version': self.app.version,
@@ -1181,7 +1238,7 @@ class ModuleGeneratorLua(ModuleGenerator):
             cond_tmpl = 'mode() == "unload" or %s'
 
         if depends_on:
-            if multi_dep_mods:
+            if multi_dep_mods and len(multi_dep_mods) > 1:
                 parent_mod_name = os.path.dirname(mod_name)
                 guard = self.is_loaded(multi_dep_mods[1:])
                 if_body = load_template % {'mod_name': parent_mod_name}

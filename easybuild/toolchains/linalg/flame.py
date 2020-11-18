@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2019 Ghent University
+# Copyright 2012-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -32,7 +32,7 @@ Support for FLAME as toolchain linear algebra library.
 from easybuild.toolchains.linalg.lapack import Lapack
 
 
-TC_CONSTANT_OPENBLAS = 'FLAME'
+TC_CONSTANT_FLAME = 'FLAME'
 
 
 class Flame(Lapack):

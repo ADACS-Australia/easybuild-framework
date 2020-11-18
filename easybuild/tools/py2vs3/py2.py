@@ -1,5 +1,5 @@
 #
-# Copyright 2019-2019 Ghent University
+# Copyright 2019-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -34,6 +34,7 @@ import ConfigParser as configparser  # noqa
 import json
 import subprocess
 import urllib2 as std_urllib  # noqa
+from HTMLParser import HTMLParser  # noqa
 from string import letters as ascii_letters  # noqa
 from string import lowercase as ascii_lowercase  # noqa
 from StringIO import StringIO  # noqa
@@ -64,7 +65,7 @@ def subprocess_popen_text(cmd, **kwargs):
 
 def raise_with_traceback(exception_class, message, traceback):
     """Raise exception of specified class with given message and traceback."""
-    raise exception_class, message, traceback
+    raise exception_class, message, traceback  # noqa: E999
 
 
 def extract_method_name(method_func):
@@ -82,3 +83,10 @@ def mk_wrapper_baseclass(metaclass):
         __wraps__ = None
 
     return WrapperBase
+
+
+def sort_looseversions(looseversions):
+    """Sort list of (values including) LooseVersion instances."""
+    # with Python 2, we can safely use 'sorted' on LooseVersion instances
+    # (but we can't in Python 3, see https://bugs.python.org/issue14894)
+    return sorted(looseversions)

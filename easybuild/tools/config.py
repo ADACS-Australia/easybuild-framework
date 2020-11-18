@@ -1,5 +1,5 @@
 # #
-# Copyright 2009-2019 Ghent University
+# Copyright 2009-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -78,9 +78,12 @@ CONT_TYPE_SINGULARITY = 'singularity'
 CONT_TYPES = [CONT_TYPE_DOCKER, CONT_TYPE_SINGULARITY]
 DEFAULT_CONT_TYPE = CONT_TYPE_SINGULARITY
 
+DEFAULT_BRANCH = 'develop'
+DEFAULT_INDEX_MAX_AGE = 7 * 24 * 60 * 60  # 1 week (in seconds)
 DEFAULT_JOB_BACKEND = 'GC3Pie'
 DEFAULT_LOGFILE_FORMAT = ("easybuild", "easybuild-%(name)s-%(version)s-%(date)s.%(time)s.log")
 DEFAULT_MAX_FAIL_RATIO_PERMS = 0.5
+DEFAULT_MINIMAL_BUILD_ENV = 'CC:gcc,CXX:g++'
 DEFAULT_MNS = 'EasyBuildMNS'
 DEFAULT_MODULE_SYNTAX = 'Lua'
 DEFAULT_MODULES_TOOL = 'Lmod'
@@ -100,6 +103,8 @@ DEFAULT_PKG_TYPE = PKG_TYPE_RPM
 DEFAULT_PNS = 'EasyBuildPNS'
 DEFAULT_PREFIX = os.path.join(os.path.expanduser('~'), ".local", "easybuild")
 DEFAULT_REPOSITORY = 'FileRepository'
+DEFAULT_WAIT_ON_LOCK_INTERVAL = 60
+DEFAULT_WAIT_ON_LOCK_LIMIT = 0
 
 EBROOT_ENV_VAR_ACTIONS = [ERROR, IGNORE, UNSET, WARN]
 LOADED_MODULES_ACTIONS = [ERROR, IGNORE, PURGE, UNLOAD, WARN]
@@ -110,6 +115,9 @@ FORCE_DOWNLOAD_PATCHES = 'patches'
 FORCE_DOWNLOAD_SOURCES = 'sources'
 FORCE_DOWNLOAD_CHOICES = [FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_PATCHES, FORCE_DOWNLOAD_SOURCES]
 DEFAULT_FORCE_DOWNLOAD = FORCE_DOWNLOAD_SOURCES
+
+# package name for generic easyblocks
+GENERIC_EASYBLOCK_PKG = 'generic'
 
 # general module class
 GENERAL_CLASS = 'all'
@@ -159,6 +167,7 @@ BUILD_OPTIONS_CMDLINE = {
         'container_image_name',
         'container_template_recipe',
         'container_tmpdir',
+        'cuda_compute_capabilities',
         'download_timeout',
         'dump_test_report',
         'easyblock',
@@ -175,6 +184,7 @@ BUILD_OPTIONS_CMDLINE = {
         'group',
         'hooks',
         'ignore_dirs',
+        'include_easyblocks_from_pr',
         'job_backend_config',
         'job_cores',
         'job_deps_type',
@@ -183,6 +193,7 @@ BUILD_OPTIONS_CMDLINE = {
         'job_output_dir',
         'job_polling_interval',
         'job_target_resource',
+        'locks_dir',
         'modules_footer',
         'modules_header',
         'mpi_cmd_template',
@@ -191,17 +202,21 @@ BUILD_OPTIONS_CMDLINE = {
         'package_tool_options',
         'parallel',
         'pr_branch_name',
+        'pr_commit_msg',
+        'pr_descr',
         'pr_target_account',
-        'pr_target_branch',
         'pr_target_repo',
+        'pr_title',
         'rpath_filter',
         'regtest_output_dir',
         'silence_deprecation_warnings',
         'skip',
         'stop',
         'subdir_user_modules',
+        'sysroot',
         'test_report_env_filter',
         'testoutput',
+        'wait_on_lock',
         'umask',
         'zip_logs',
     ],
@@ -221,10 +236,12 @@ BUILD_OPTIONS_CMDLINE = {
         'group_writable_installdir',
         'hidden',
         'ignore_checksums',
+        'ignore_index',
+        'ignore_locks',
         'install_latest_eb_release',
-        'lib64_fallback_sanity_check',
         'logtostdout',
         'minimal_toolchains',
+        'module_extensions',
         'module_only',
         'package',
         'read_only_installdir',
@@ -236,6 +253,7 @@ BUILD_OPTIONS_CMDLINE = {
         'sequential',
         'set_gid_bit',
         'skip_test_cases',
+        'generate_devel_module',
         'sticky_bit',
         'trace',
         'upload_test_report',
@@ -244,6 +262,7 @@ BUILD_OPTIONS_CMDLINE = {
         'use_f90cache',
         'use_existing_modules',
         'set_default_module',
+        'wait_on_lock_limit',
     ],
     True: [
         'cleanup_builddir',
@@ -251,6 +270,8 @@ BUILD_OPTIONS_CMDLINE = {
         'cleanup_tmpdir',
         'extended_dry_run_ignore_errors',
         'fixed_installdir_naming_scheme',
+        'lib64_fallback_sanity_check',
+        'lib64_lib_symlink',
         'mpi_tests',
         'map_toolchains',
         'modules_tool_version_check',
@@ -265,8 +286,17 @@ BUILD_OPTIONS_CMDLINE = {
     DEFAULT_CONT_TYPE: [
         'container_type',
     ],
+    DEFAULT_BRANCH: [
+        'pr_target_branch',
+    ],
+    DEFAULT_INDEX_MAX_AGE: [
+        'index_max_age',
+    ],
     DEFAULT_MAX_FAIL_RATIO_PERMS: [
         'max_fail_ratio_adjust_permissions',
+    ],
+    DEFAULT_MINIMAL_BUILD_ENV: [
+        'minimal_build_env',
     ],
     DEFAULT_PKG_RELEASE: [
         'package_release',
@@ -285,6 +315,9 @@ BUILD_OPTIONS_CMDLINE = {
     ],
     DEFAULT_ALLOW_LOADED_MODULES: [
         'allow_loaded_modules',
+    ],
+    DEFAULT_WAIT_ON_LOCK_INTERVAL: [
+        'wait_on_lock_interval',
     ],
 }
 # build option that do not have a perfectly matching command line option
@@ -440,8 +473,11 @@ def init_build_options(build_options=None, cmdline_options=None):
             cmdline_options.force = True
             retain_all_deps = True
 
-        if cmdline_options.new_pr or cmdline_options.update_pr:
-            _log.info("Retaining all dependencies of specified easyconfigs to create/update pull request")
+        new_update_opt = cmdline_options.new_branch_github or cmdline_options.new_pr
+        new_update_opt = new_update_opt or cmdline_options.update_branch_github or cmdline_options.update_pr
+
+        if new_update_opt:
+            _log.info("Retaining all dependencies of specified easyconfigs to create/update branch or pull request")
             retain_all_deps = True
 
         auto_ignore_osdeps_options = [cmdline_options.check_conflicts, cmdline_options.check_contrib,
@@ -449,8 +485,9 @@ def init_build_options(build_options=None, cmdline_options=None):
                                       cmdline_options.dep_graph, cmdline_options.dry_run,
                                       cmdline_options.dry_run_short, cmdline_options.dump_env_script,
                                       cmdline_options.extended_dry_run, cmdline_options.fix_deprecated_easyconfigs,
-                                      cmdline_options.missing_modules, cmdline_options.new_pr,
-                                      cmdline_options.preview_pr, cmdline_options.update_pr]
+                                      cmdline_options.missing_modules, cmdline_options.new_branch_github,
+                                      cmdline_options.new_pr, cmdline_options.preview_pr,
+                                      cmdline_options.update_branch_github, cmdline_options.update_pr]
         if any(auto_ignore_osdeps_options):
             _log.info("Auto-enabling ignoring of OS dependencies")
             cmdline_options.ignore_osdeps = True

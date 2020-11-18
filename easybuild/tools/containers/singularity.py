@@ -1,4 +1,4 @@
-# Copyright 2017-2019 Ghent University
+# Copyright 2017-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -94,8 +94,9 @@ scDescriptT = {
 }
 EOF
 
-# change to 'easybuild' user
-su - easybuild
+# switch to 'easybuild' user for following commands
+# quotes around EOF delimiter are important to ensure environment variables are not expanded prematurely!
+su - easybuild << 'EOF'
 
 # verbose commands, exit on first error
 set -ve
@@ -122,8 +123,8 @@ eb %(easyconfigs)s --robot %(eb_args)s
 mkdir -p /app/lmodcache
 $LMOD_DIR/update_lmod_system_cache_files -d /app/lmodcache -t /app/lmodcache/timestamp /app/modules/all
 
-# exit from 'easybuild' user
-exit
+# end of set of commands to run as 'easybuild' user
+EOF
 
 # cleanup, everything in /scratch is assumed to be temporary
 rm -rf /scratch/*
@@ -311,6 +312,9 @@ class SingularityContainer(ContainerGenerator):
         if 'install_eb' not in template_data:
             template_data['install_eb'] = '\n'.join([
                 "# install EasyBuild using pip",
+                # upgrade pip
+                "pip install -U pip",
+                "pip install wheel",
                 # EasyBuild 3.x requires setuptools as runtime dependency
                 "pip install -U setuptools",
                 # stick to previous version of vsc-install to avoid requiring mock (which causes installation problems)

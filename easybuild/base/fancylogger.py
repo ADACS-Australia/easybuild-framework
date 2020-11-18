@@ -1,5 +1,5 @@
 #
-# Copyright 2011-2018 Ghent University
+# Copyright 2011-2020 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -224,6 +224,7 @@ def getLevelInt(level_name):
 
 class FancyStreamHandler(logging.StreamHandler):
     """The logging StreamHandler with uniform named arg in __init__ for selecting the stream."""
+
     def __init__(self, stream=None, stdout=None):
         """Initialize the stream (default is sys.stderr)
             - stream : a specific stream to use
@@ -245,6 +246,7 @@ class FancyLogRecord(logging.LogRecord):
     This class defines a custom log record.
     Adding extra specifiers is as simple as adding attributes to the log record
     """
+
     def __init__(self, *args, **kwargs):
         logging.LogRecord.__init__(self, *args, **kwargs)
         # modify custom specifiers here
@@ -454,7 +456,7 @@ def getLogger(name=None, fname=False, clsname=False, fancyrecord=None):
     if not is_fancyroot():
         # deliberately not calling getRootLoggerName function to determine actual root logger name,
         # because it is prohibitively expensive in some texts (even when using 'python -O')
-        nameparts.append('root')
+        nameparts.append('fancyroot')
 
     if fancyrecord is None:
         # Altough we could set it as default value in the function definition
@@ -782,7 +784,7 @@ def getAllExistingLoggers():
     """
     # not-so-well documented manager (in 2.6 and later)
     # return list of (name,logger) tuple
-    return [x for x in logging.Logger.manager.loggerDict.items()]+[(logging.root.name, logging.root)]
+    return [x for x in logging.Logger.manager.loggerDict.items()] + [(logging.root.name, logging.root)]
 
 
 def getAllNonFancyloggers():
