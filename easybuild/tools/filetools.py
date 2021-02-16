@@ -1355,7 +1355,7 @@ def convert_name(name, upper=False):
         return name
 
 
-def adjust_permissions(name, permissionBits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
+def adjust_permissions(provided_path, permission_bits, add=True, onlyfiles=False, onlydirs=False, recursive=True,
                        group_id=None, relative=True, ignore_errors=False, skip_symlinks=None, stdout=False):
     """
     Change permissions for specified path, using specified permission bits
