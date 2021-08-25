@@ -144,10 +144,10 @@ def build_and_install_software(ecs, init_session_state, exit_on_failure=True):
                 adjust_permissions(parent_dir, stat.S_IWUSR, add=False, recursive=False)
 
         # Fix permissions
-        print("Running permissions step after moving logs, permission errors will only be printed to the stdout.")
-        app.permissions_step()
+        # print("Running permissions step after moving logs, permission errors will only be printed to the stdout.")
+        # app.permissions_step()
 
-        del app
+        # del app
 
         if not ec_res['success'] and exit_on_failure:
             if 'traceback' in ec_res:
