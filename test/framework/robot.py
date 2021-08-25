@@ -1,5 +1,5 @@
 # #
-# Copyright 2012-2020 Ghent University
+# Copyright 2012-2021 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -620,12 +620,19 @@ class RobotTest(EnhancedTestCase):
 
         test_ec = 'toy-0.0-deps.eb'
         shutil.copy2(os.path.join(test_ecs_path, 't', 'toy', test_ec), self.test_prefix)
+        # copy hwloc easyconfig to h/hwloc subdir in robot search path,
+        # to trigger bug fixed in det_easyconfig_paths (.extend rather than .append for '__archive'__ to ignore_subdirs)
+        hwloc_ec = 'hwloc-1.11.8-GCC-6.4.0-2.28.eb'
+        subdir_hwloc = os.path.join(self.test_prefix, 'h', 'hwloc')
+        mkdir(subdir_hwloc, parents=True)
+        shutil.copy2(os.path.join(test_ecs_path, 'h', 'hwloc', hwloc_ec), subdir_hwloc)
         shutil.copy2(os.path.join(test_ecs_path, 'i', 'intel', 'intel-2018a.eb'), self.test_prefix)
         self.assertFalse(os.path.exists(test_ec))
 
         args = [
             os.path.join(test_ecs_path, 't', 'toy', 'toy-0.0.eb'),
             test_ec,  # relative path, should be resolved via robot search path
+            hwloc_ec,
             '--dry-run',
             '--debug',
             '--robot',
@@ -640,6 +647,7 @@ class RobotTest(EnhancedTestCase):
             (test_ecs_path, 'toy/0.0'),  # specified easyconfigs, available at given location
             (self.test_prefix, 'intel/2018a'),  # dependency, found in robot search path
             (self.test_prefix, 'toy/0.0-deps'),  # specified easyconfig, found in robot search path
+            (self.test_prefix, 'hwloc/1.11.8-GCC-6.4.0-2.28'),  # specified easyconfig, found in robot search path
         ]
         for path_prefix, module in modules:
             ec_fn = "%s.eb" % '-'.join(module.split('/'))
@@ -654,7 +662,8 @@ class RobotTest(EnhancedTestCase):
             '--robot',
             '--unittest-file=%s' % self.logfile,
         ]
-        self.assertErrorRegex(EasyBuildError, "Can't find", self.eb_main, args, logfile=dummylogfn, raise_error=True)
+        error_pattern = "One or more files not found: intel-2012a.eb"
+        self.assertErrorRegex(EasyBuildError, error_pattern, self.eb_main, args, logfile=dummylogfn, raise_error=True)
 
         args.append('--consider-archived-easyconfigs')
         outtxt = self.eb_main(args, logfile=dummylogfn, raise_error=True)
@@ -687,7 +696,7 @@ class RobotTest(EnhancedTestCase):
         regex = re.compile(r"^ \* %s$" % os.path.join(self.test_prefix, test_ec), re.M)
         self.assertTrue(regex.search(outtxt), "Found pattern %s in %s" % (regex.pattern, outtxt))
 
-    def test_det_easyconfig_paths_from_pr(self):
+    def test_github_det_easyconfig_paths_from_pr(self):
         """Test det_easyconfig_paths function, with --from-pr enabled as well."""
         if self.github_token is None:
             print("Skipping test_from_pr, no GitHub token available?")
@@ -1056,8 +1065,8 @@ class RobotTest(EnhancedTestCase):
         test_easyconfigs = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'easyconfigs', 'test_ecs')
 
         # Create directories to store the tweaked easyconfigs
-        tweaked_ecs_paths, pr_path = alt_easyconfig_paths(self.test_prefix, tweaked_ecs=True)
-        robot_path = det_robot_path([test_easyconfigs], tweaked_ecs_paths, pr_path, auto_robot=True)
+        tweaked_ecs_paths, pr_paths = alt_easyconfig_paths(self.test_prefix, tweaked_ecs=True)
+        robot_path = det_robot_path([test_easyconfigs], tweaked_ecs_paths, pr_paths, auto_robot=True)
 
         init_config(build_options={
             'valid_module_classes': module_classes(),
@@ -1504,10 +1513,10 @@ class RobotTest(EnhancedTestCase):
 
         paths = search_easyconfigs('8-gcc', consider_extra_paths=False, print_result=False)
         ref_paths = [
+            os.path.join(test_ecs, 'h', 'hwloc', 'hwloc-1.8-gcccuda-2018a.eb'),
             os.path.join(test_ecs, 'h', 'hwloc', 'hwloc-1.11.8-GCC-4.6.4.eb'),
             os.path.join(test_ecs, 'h', 'hwloc', 'hwloc-1.11.8-GCC-6.4.0-2.28.eb'),
             os.path.join(test_ecs, 'h', 'hwloc', 'hwloc-1.11.8-GCC-7.3.0-2.30.eb'),
-            os.path.join(test_ecs, 'h', 'hwloc', 'hwloc-1.8-gcccuda-2018a.eb'),
             os.path.join(test_ecs, 'o', 'OpenBLAS', 'OpenBLAS-0.2.8-GCC-4.8.2-LAPACK-3.4.2.eb')
         ]
         self.assertEqual(paths, ref_paths)

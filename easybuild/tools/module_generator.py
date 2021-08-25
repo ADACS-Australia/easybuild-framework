@@ -1,5 +1,5 @@
 # #
-# Copyright 2009-2020 Ghent University
+# Copyright 2009-2021 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -394,7 +394,7 @@ class ModuleGenerator(object):
         """
         raise NotImplementedError
 
-    def getenv_cmd(self, envvar):
+    def getenv_cmd(self, envvar, default=None):
         """
         Return module-syntax specific code to get value of specific environment variable.
         """
@@ -558,6 +558,9 @@ class ModuleGenerator(object):
 
         # Examples (optional)
         lines.extend(self._generate_section('Examples', self.app.cfg['examples'], strip=True))
+
+        # Citing (optional)
+        lines.extend(self._generate_section('Citing', self.app.cfg['citing'], strip=True))
 
         # Additional information: homepage + (if available) doc paths/urls, upstream/site contact
         lines.extend(self._generate_section("More information", " - Homepage: %s" % self.app.cfg['homepage']))
@@ -776,18 +779,27 @@ class ModuleGeneratorTcl(ModuleGenerator):
 
         return txt
 
-    def getenv_cmd(self, envvar):
+    def getenv_cmd(self, envvar, default=None):
         """
         Return module-syntax specific code to get value of specific environment variable.
         """
-        return '$::env(%s)' % envvar
+        if default is None:
+            cmd = '$::env(%s)' % envvar
+        else:
+            values = {
+                'default': default,
+                'envvar': '::env(%s)' % envvar,
+            }
+            cmd = '[if { [info exists %(envvar)s] } { concat $%(envvar)s } else { concat "%(default)s" } ]' % values
+        return cmd
 
-    def load_module(self, mod_name, recursive_unload=False, depends_on=False, unload_modules=None, multi_dep_mods=None):
+    def load_module(self, mod_name, recursive_unload=None, depends_on=False, unload_modules=None, multi_dep_mods=None):
         """
         Generate load statement for specified module.
 
         :param mod_name: name of module to generate load statement for
         :param recursive_unload: boolean indicating whether the 'load' statement should be reverted on unload
+                                 (if None: enable if recursive_mod_unload build option or depends_on is True)
         :param depends_on: use depends_on statements rather than (guarded) load statements
         :param unload_modules: name(s) of module to unload first
         :param multi_dep_mods: list of module names in multi_deps context, to use for guarding load statement
@@ -807,7 +819,11 @@ class ModuleGeneratorTcl(ModuleGenerator):
         depends_on = load_template == self.LOAD_TEMPLATE_DEPENDS_ON
 
         cond_tmpl = None
-        if build_option('recursive_mod_unload') or recursive_unload or depends_on:
+
+        if recursive_unload is None:
+            recursive_unload = build_option('recursive_mod_unload') or depends_on
+
+        if recursive_unload:
             # wrapping the 'module load' statement with an 'is-loaded or mode == unload'
             # guard ensures recursive unloading while avoiding load storms;
             # when "module unload" is called on the module in which the
@@ -1196,18 +1212,23 @@ class ModuleGeneratorLua(ModuleGenerator):
 
         return txt
 
-    def getenv_cmd(self, envvar):
+    def getenv_cmd(self, envvar, default=None):
         """
         Return module-syntax specific code to get value of specific environment variable.
         """
-        return 'os.getenv("%s")' % envvar
+        if default is None:
+            cmd = 'os.getenv("%s")' % envvar
+        else:
+            cmd = 'os.getenv("%s") or "%s"' % (envvar, default)
+        return cmd
 
-    def load_module(self, mod_name, recursive_unload=False, depends_on=False, unload_modules=None, multi_dep_mods=None):
+    def load_module(self, mod_name, recursive_unload=None, depends_on=False, unload_modules=None, multi_dep_mods=None):
         """
         Generate load statement for specified module.
 
         :param mod_name: name of module to generate load statement for
         :param recursive_unload: boolean indicating whether the 'load' statement should be reverted on unload
+                                 (if None: enable if recursive_mod_unload build option or depends_on is True)
         :param depends_on: use depends_on statements rather than (guarded) load statements
         :param unload_modules: name(s) of module to unload first
         :param multi_dep_mods: list of module names in multi_deps context, to use for guarding load statement
@@ -1228,7 +1249,11 @@ class ModuleGeneratorLua(ModuleGenerator):
         depends_on = load_template == self.LOAD_TEMPLATE_DEPENDS_ON
 
         cond_tmpl = None
-        if build_option('recursive_mod_unload') or recursive_unload or depends_on:
+
+        if recursive_unload is None:
+            recursive_unload = build_option('recursive_mod_unload') or depends_on
+
+        if recursive_unload:
             # wrapping the 'module load' statement with an 'is-loaded or mode == unload'
             # guard ensures recursive unloading while avoiding load storms;
             # when "module unload" is called on the module in which the
@@ -1415,7 +1440,10 @@ class ModuleGeneratorLua(ModuleGenerator):
         :param mod_name_in: name of module to load (swap in)
         :param guarded: guard 'swap' statement, fall back to 'load' if module being swapped out is not loaded
         """
-        body = 'swap("%s", "%s")' % (mod_name_out, mod_name_in)
+        body = '\n'.join([
+            'unload("%s")' % mod_name_out,
+            'load("%s")' % mod_name_in,
+        ])
         if guarded:
             alt_body = self.LOAD_TEMPLATE % {'mod_name': mod_name_in}
             swap_statement = [self.conditional_statement(self.is_loaded(mod_name_out), body, else_body=alt_body)]
