@@ -125,7 +125,7 @@ def build_and_install_software(ecs, init_session_state, exit_on_failure=True):
 
         ec_res = {}
         try:
-            (ec_res['success'], app_log, err, app) = build_and_install_one(ec, init_env, hooks=hooks)
+            (ec_res['success'], app_log, err, app) = build_and_install_one(ec, init_env)
             ec_res['log_file'] = app_log
             if not ec_res['success']:
                 ec_res['err'] = EasyBuildError(err)
