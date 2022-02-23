@@ -1757,16 +1757,16 @@ def adjust_permissions(provided_path, permission_bits, add=True, onlyfiles=False
             if relative:
                 # relative permissions (add or remove)
                 if add:
-                    if perms | permissionBits != perms:
-                        os.chmod(path, perms | permissionBits)
+                    if perms | permission_bits != perms:
+                        os.chmod(path, perms | permission_bits)
                 else:
-                    if perms & ~permissionBits != perms:
-                        os.chmod(path, perms & ~permissionBits)
+                    if perms & ~permission_bits != perms:
+                        os.chmod(path, perms & ~permission_bits)
 
             else:
-                if permissionBits != perms:
+                if permission_bits != perms:
                     # hard permissions bits (not relative)
-                    os.chmod(path, permissionBits)
+                    os.chmod(path, permission_bits)
 
             if group_id:
                 # only change the group id if it the current gid is different from what we want
