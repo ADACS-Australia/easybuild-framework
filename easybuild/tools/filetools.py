@@ -1790,13 +1790,13 @@ def adjust_permissions(provided_path, permission_bits, add=True, onlyfiles=False
                 err_msg = err
 
     if failed_paths:
-        raise EasyBuildError("Failed to chmod/chown several paths: %s (last error: %s)", failed_paths, err_msg)
+        _log.warning("Failed to chmod/chown several paths: %s (last error: %s)", failed_paths, err_msg)
 
     # we ignore some errors, but if there are to many, something is definitely wrong
     fail_ratio = fail_cnt / float(len(allpaths))
     max_fail_ratio = float(build_option('max_fail_ratio_adjust_permissions'))
     if fail_ratio > max_fail_ratio:
-        raise EasyBuildError("%.2f%% of permissions/owner operations failed (more than %.2f%%), "
+        _log.warning("%.2f%% of permissions/owner operations failed (more than %.2f%%), "
                              "something must be wrong...", 100 * fail_ratio, 100 * max_fail_ratio)
     elif fail_cnt > 0:
         _log.debug("%.2f%% of permissions/owner operations failed, ignoring that...", 100 * fail_ratio)
