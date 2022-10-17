@@ -1,5 +1,5 @@
 ##
-# Copyright 2009-2021 Ghent University
+# Copyright 2009-2022 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -61,8 +61,8 @@ from easybuild.tools.build_log import DEVEL_LOG_LEVEL, EasyBuildError
 from easybuild.tools.build_log import init_logging, log_start, print_msg, print_warning, raise_easybuilderror
 from easybuild.tools.config import CONT_IMAGE_FORMATS, CONT_TYPES, DEFAULT_CONT_TYPE, DEFAULT_ALLOW_LOADED_MODULES
 from easybuild.tools.config import DEFAULT_BRANCH, DEFAULT_ENV_FOR_SHEBANG, DEFAULT_ENVVAR_USERS_MODULES
-from easybuild.tools.config import DEFAULT_FORCE_DOWNLOAD, DEFAULT_INDEX_MAX_AGE
-from easybuild.tools.config import DEFAULT_JOB_BACKEND, DEFAULT_LOGFILE_FORMAT, DEFAULT_MAX_FAIL_RATIO_PERMS
+from easybuild.tools.config import DEFAULT_FORCE_DOWNLOAD, DEFAULT_INDEX_MAX_AGE, DEFAULT_JOB_BACKEND
+from easybuild.tools.config import DEFAULT_JOB_EB_CMD, DEFAULT_LOGFILE_FORMAT, DEFAULT_MAX_FAIL_RATIO_PERMS
 from easybuild.tools.config import DEFAULT_MINIMAL_BUILD_ENV, DEFAULT_MNS, DEFAULT_MODULE_SYNTAX, DEFAULT_MODULES_TOOL
 from easybuild.tools.config import DEFAULT_MODULECLASSES, DEFAULT_PATH_SUBDIRS, DEFAULT_PKG_RELEASE, DEFAULT_PKG_TOOL
 from easybuild.tools.config import DEFAULT_PKG_TYPE, DEFAULT_PNS, DEFAULT_PREFIX, DEFAULT_PR_TARGET_ACCOUNT
@@ -351,6 +351,8 @@ class EasyBuildOptions(GeneralOption):
                                                           None, 'store_true', False),
             'backup-modules': ("Back up an existing module file, if any. Only works when using --module-only",
                                None, 'store_true', None),  # default None to allow auto-enabling if not disabled
+            'backup-patched-files': ("Create a backup (*.orig) file when applying a patch",
+                                     None, 'store_true', False),
             'banned-linked-shared-libs': ("Comma-separated list of shared libraries (names, file names, or paths) "
                                           "which are not allowed to be linked in any installed binary/library",
                                           'strlist', 'extend', None),
@@ -800,6 +802,7 @@ class EasyBuildOptions(GeneralOption):
             'cores': ("Number of cores to request per job", 'int', 'store', None),
             'deps-type': ("Type of dependency to set between jobs (default depends on job backend)",
                           'choice', 'store', None, [JOB_DEPS_TYPE_ABORT_ON_ERROR, JOB_DEPS_TYPE_ALWAYS_RUN]),
+            'eb-cmd': ("EasyBuild command to use in jobs", 'str', 'store', DEFAULT_JOB_EB_CMD),
             'max-jobs': ("Maximum number of concurrent jobs (queued and running, 0 = unlimited)", 'int', 'store', 0),
             'max-walltime': ("Maximum walltime for jobs (in hours)", 'int', 'store', 24),
             'output-dir': ("Output directory for jobs (default: current directory)", None, 'store', os.getcwd()),
@@ -1549,10 +1552,16 @@ def set_up_configuration(args=None, logfile=None, testing=False, silent=False):
     except ValueError:
         raise EasyBuildError("Argument to --from-pr must be a comma separated list of PR #s.")
 
+    try:
+        review_pr = (lambda x: int(x) if x else None)(eb_go.options.review_pr)
+    except ValueError:
+        raise EasyBuildError("Argument to --review-pr must be an integer PR #.")
+
     # determine robot path
     # --try-X, --dep-graph, --search use robot path for searching, so enable it with path of installed easyconfigs
     tweaked_ecs = try_to_generate and build_specs
-    tweaked_ecs_paths, pr_paths = alt_easyconfig_paths(tmpdir, tweaked_ecs=tweaked_ecs, from_prs=from_prs)
+    tweaked_ecs_paths, pr_paths = alt_easyconfig_paths(tmpdir, tweaked_ecs=tweaked_ecs, from_prs=from_prs,
+                                                       review_pr=review_pr)
     auto_robot = try_to_generate or options.check_conflicts or options.dep_graph or search_query
     robot_path = det_robot_path(options.robot_paths, tweaked_ecs_paths, pr_paths, auto_robot=auto_robot)
     log.debug("Full robot path: %s", robot_path)

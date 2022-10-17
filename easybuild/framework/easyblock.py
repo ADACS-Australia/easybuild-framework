@@ -1,5 +1,5 @@
 # #
-# Copyright 2009-2021 Ghent University
+# Copyright 2009-2022 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -97,7 +97,8 @@ from easybuild.tools.output import show_progress_bars, start_progress_bar, stop_
 from easybuild.tools.package.utilities import package
 from easybuild.tools.py2vs3 import extract_method_name, string_type
 from easybuild.tools.repository.repository import init_repository
-from easybuild.tools.systemtools import check_linked_shared_libs, det_parallelism, get_shared_lib_ext, use_group
+from easybuild.tools.systemtools import check_linked_shared_libs, det_parallelism, get_linked_libs_raw
+from easybuild.tools.systemtools import get_shared_lib_ext, use_group
 from easybuild.tools.utilities import INDENT_4SPACES, get_class_for, nub, quote_str
 from easybuild.tools.utilities import remove_unwanted_chars, time2str, trace_msg
 from easybuild.tools.version import this_is_easybuild, VERBOSE_VERSION, VERSION
@@ -358,7 +359,7 @@ class EasyBlock(object):
         else:
             raise EasyBuildError("Invalid type for checksums (%s), should be list, tuple or None.", type(checksums))
 
-    def fetch_source(self, source, checksum=None, extension=False):
+    def fetch_source(self, source, checksum=None, extension=False, download_instructions=None):
         """
         Get a specific source (tarball, iso, url)
         Will be tested for existence or can be located
@@ -367,7 +368,8 @@ class EasyBlock(object):
         :param checksum: checksum corresponding to source
         :param extension: flag if being called from collect_exts_file_info()
         """
-        filename, download_filename, extract_cmd, source_urls, git_config = None, None, None, None, None
+        filename, download_filename, extract_cmd = None, None, None
+        source_urls, git_config, alt_location = None, None, None
 
         if source is None:
             raise EasyBuildError("fetch_source called with empty 'source' argument")
@@ -381,6 +383,7 @@ class EasyBlock(object):
             download_filename = source.pop('download_filename', None)
             source_urls = source.pop('source_urls', None)
             git_config = source.pop('git_config', None)
+            alt_location = source.pop('alt_location', None)
             if source:
                 raise EasyBuildError("Found one or more unexpected keys in 'sources' specification: %s", source)
 
@@ -394,7 +397,8 @@ class EasyBlock(object):
         # check if the sources can be located
         force_download = build_option('force_download') in [FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_SOURCES]
         path = self.obtain_file(filename, extension=extension, download_filename=download_filename,
-                                force_download=force_download, urls=source_urls, git_config=git_config)
+                                force_download=force_download, urls=source_urls, git_config=git_config,
+                                download_instructions=download_instructions, alt_location=alt_location)
         if path is None:
             raise EasyBuildError('No file found for source %s', filename)
 
@@ -448,16 +452,22 @@ class EasyBlock(object):
         Add a list of patches.
         All patches will be checked if a file exists (or can be located)
         """
+        post_install_patches = []
         if patch_specs is None:
-            patch_specs = self.cfg['patches']
+            # if no patch_specs are specified, use all pre-install and post-install patches
+            post_install_patches = self.cfg['postinstallpatches']
+            patch_specs = self.cfg['patches'] + post_install_patches
 
         patches = []
         for index, patch_spec in enumerate(patch_specs):
 
             patch_info = create_patch_info(patch_spec)
+            patch_info['postinstall'] = patch_spec in post_install_patches
 
             force_download = build_option('force_download') in [FORCE_DOWNLOAD_ALL, FORCE_DOWNLOAD_PATCHES]
-            path = self.obtain_file(patch_info['name'], extension=extension, force_download=force_download)
+            alt_location = patch_info.pop('alt_location', None)
+            path = self.obtain_file(patch_info['name'], extension=extension, force_download=force_download,
+                                    alt_location=alt_location)
             if path:
                 self.log.debug('File %s found for patch %s', path, patch_spec)
                 patch_info['path'] = path
@@ -506,11 +516,13 @@ class EasyBlock(object):
         for ext in exts_list:
             if isinstance(ext, (list, tuple)) and ext:
                 # expected format: (name, version, options (dict))
-                ext_name = ext[0]
+                # name and version can use templates, resolved via parent EC
+
+                ext_name = resolve_template(ext[0], self.cfg.template_values)
                 if len(ext) == 1:
                     exts_sources.append({'name': ext_name})
                 else:
-                    ext_version = ext[1]
+                    ext_version = resolve_template(ext[1], self.cfg.template_values)
 
                     # make sure we grab *raw* dict of default options for extension,
                     # since it may use template values like %(name)s & %(version)s
@@ -545,6 +557,8 @@ class EasyBlock(object):
                     source_urls = ext_options.get('source_urls', [])
                     checksums = ext_options.get('checksums', [])
 
+                    download_instructions = ext_options.get('download_instructions')
+
                     if ext_options.get('nosource', None):
                         self.log.debug("No sources for extension %s, as indicated by 'nosource'", ext_name)
 
@@ -576,7 +590,8 @@ class EasyBlock(object):
                             source['source_urls'] = source_urls
 
                         if fetch_files:
-                            src = self.fetch_source(source, checksums, extension=True)
+                            src = self.fetch_source(source, checksums, extension=True,
+                                                    download_instructions=download_instructions)
                             ext_src.update({
                                 # keep track of custom extract command (if any)
                                 'extract_cmd': src['cmd'],
@@ -598,7 +613,8 @@ class EasyBlock(object):
 
                         if fetch_files:
                             src_path = self.obtain_file(src_fn, extension=True, urls=source_urls,
-                                                        force_download=force_download)
+                                                        force_download=force_download,
+                                                        download_instructions=download_instructions)
                             if src_path:
                                 ext_src.update({'src': src_path})
                             else:
@@ -672,7 +688,7 @@ class EasyBlock(object):
         return exts_sources
 
     def obtain_file(self, filename, extension=False, urls=None, download_filename=None, force_download=False,
-                    git_config=None):
+                    git_config=None, download_instructions=None, alt_location=None):
         """
         Locate the file with the given name
         - searches in different subdirectories of source path
@@ -683,10 +699,17 @@ class EasyBlock(object):
         :param download_filename: filename with which the file should be downloaded, and then renamed to <filename>
         :param force_download: always try to download file, even if it's already available in source path
         :param git_config: dictionary to define how to download a git repository
+        :param download_instructions: instructions to manually add source (used for complex cases)
+        :param alt_location: alternative location to use instead of self.name
         """
         srcpaths = source_paths()
 
         update_progress_bar(PROGRESS_BAR_DOWNLOAD_ALL, label=filename)
+
+        if alt_location is None:
+            location = self.name
+        else:
+            location = alt_location
 
         # should we download or just try and find it?
         if re.match(r"^(https?|ftp)://", filename):
@@ -696,7 +719,7 @@ class EasyBlock(object):
             filename = url.split('/')[-1]
 
             # figure out where to download the file to
-            filepath = os.path.join(srcpaths[0], letter_dir_for(self.name), self.name)
+            filepath = os.path.join(srcpaths[0], letter_dir_for(location), location)
             if extension:
                 filepath = os.path.join(filepath, "extensions")
             self.log.info("Creating path %s to download file to" % filepath)
@@ -735,8 +758,8 @@ class EasyBlock(object):
 
             for path in ebpath + common_filepaths + srcpaths:
                 # create list of candidate filepaths
-                namepath = os.path.join(path, self.name)
-                letterpath = os.path.join(path, letter_dir_for(self.name), self.name)
+                namepath = os.path.join(path, location)
+                letterpath = os.path.join(path, letter_dir_for(location), location)
 
                 # most likely paths
                 candidate_filepaths = [
@@ -775,8 +798,8 @@ class EasyBlock(object):
 
                     break  # no need to try other source paths
 
-            name_letter = self.name.lower()[0]
-            targetdir = os.path.join(srcpaths[0], name_letter, self.name)
+            name_letter = location.lower()[0]
+            targetdir = os.path.join(srcpaths[0], name_letter, location)
 
             if foundfile:
                 if self.dry_run:
@@ -793,7 +816,7 @@ class EasyBlock(object):
                 source_urls.extend(self.cfg['source_urls'])
 
                 # add https://sources.easybuild.io as fallback source URL
-                source_urls.append(EASYBUILD_SOURCES_URL + '/' + os.path.join(name_letter, self.name))
+                source_urls.append(EASYBUILD_SOURCES_URL + '/' + os.path.join(name_letter, location))
 
                 mkdir(targetdir, parents=True)
 
@@ -859,8 +882,21 @@ class EasyBlock(object):
                     self.dry_run_msg("  * %s (MISSING)", filename)
                     return filename
                 else:
-                    raise EasyBuildError("Couldn't find file %s anywhere, and downloading it didn't work either... "
-                                         "Paths attempted (in order): %s ", filename, ', '.join(failedpaths))
+                    error_msg = "Couldn't find file %s anywhere, "
+                    if download_instructions is None:
+                        download_instructions = self.cfg['download_instructions']
+                    if download_instructions is not None and download_instructions != "":
+                        msg = "\nDownload instructions:\n\n" + download_instructions + '\n'
+                        print_msg(msg, prefix=False, stderr=True)
+                        error_msg += "please follow the download instructions above, and make the file available "
+                        error_msg += "in the active source path (%s)" % ':'.join(source_paths())
+                    else:
+                        # flatten list to string with '%' characters escaped (literal '%' desired in 'sprintf')
+                        failedpaths_msg = ', '.join(failedpaths).replace('%', '%%')
+                        error_msg += "and downloading it didn't work either... "
+                        error_msg += "Paths attempted (in order): %s " % failedpaths_msg
+
+                    raise EasyBuildError(error_msg, filename)
 
     #
     # GETTER/SETTER UTILITY FUNCTIONS
@@ -932,7 +968,7 @@ class EasyBlock(object):
         if not self.cfg.get('cleanupoldbuild', False):
             uniq_builddir = builddir
             suff = 0
-            while(os.path.isdir(uniq_builddir)):
+            while os.path.isdir(uniq_builddir):
                 uniq_builddir = "%s.%d" % (builddir, suff)
                 suff += 1
             builddir = uniq_builddir
@@ -1726,7 +1762,13 @@ class EasyBlock(object):
 
         if build_option('parallel_extensions_install'):
             self.log.experimental("installing extensions in parallel")
-            self.install_extensions_parallel(install=install)
+            try:
+                self.install_extensions_parallel(install=install)
+            except NotImplementedError:
+                # If parallel extension install is not supported for this type of extension then install sequentially
+                msg = "Parallel extensions install not supported for %s - using sequential install" % self.name
+                self.log.experimental(msg)
+                self.install_extensions_sequential(install=install)
         else:
             self.install_extensions_sequential(install=install)
 
@@ -2224,7 +2266,7 @@ class EasyBlock(object):
             self.dry_run_msg("\nList of patches:")
 
         # fetch patches
-        if self.cfg['patches']:
+        if self.cfg['patches'] + self.cfg['postinstallpatches']:
             if isinstance(self.cfg['checksums'], (list, tuple)):
                 # if checksums are provided as a list, first entries are assumed to be for sources
                 patches_checksums = self.cfg['checksums'][len(self.cfg['sources']):]
@@ -2396,11 +2438,15 @@ class EasyBlock(object):
             else:
                 raise EasyBuildError("Unpacking source %s failed", src['name'])
 
-    def patch_step(self, beginpath=None):
+    def patch_step(self, beginpath=None, patches=None):
         """
         Apply the patches
         """
-        for patch in self.patches:
+        if patches is None:
+            # if no patches are specified, use all non-post-install patches
+            patches = [p for p in self.patches if not p['postinstall']]
+
+        for patch in patches:
             self.log.info("Applying patch %s" % patch['name'])
             trace_msg("applying patch %s" % patch['name'])
 
@@ -2815,6 +2861,19 @@ class EasyBlock(object):
                     raise EasyBuildError("Invalid element in 'postinstallcmds', not a string: %s", cmd)
                 run_cmd(cmd, simple=True, log_ok=True, log_all=True)
 
+    def apply_post_install_patches(self, patches=None):
+        """
+        Apply post-install patch files that are specified via the 'postinstallpatches' easyconfig parameter.
+        """
+        if patches is None:
+            patches = [p for p in self.patches if p['postinstall']]
+
+        self.log.debug("Post-install patches to apply: %s", patches)
+        if patches:
+            # self may be inherited from the Bundle easyblock and that patch_step is a no-op
+            # To allow postinstallpatches for Bundle, and derived, easyblocks we directly call EasyBlock.patch_step
+            EasyBlock.patch_step(self, beginpath=self.installdir, patches=patches)
+
     def post_install_step(self):
         """
         Do some postprocessing
@@ -2822,6 +2881,7 @@ class EasyBlock(object):
         """
 
         self.run_post_install_commands()
+        self.apply_post_install_patches()
 
         self.fix_shebang()
 
@@ -2931,24 +2991,15 @@ class EasyBlock(object):
                 for path in [os.path.join(dirpath, x) for x in os.listdir(dirpath)]:
                     self.log.debug("Sanity checking RPATH for %s", path)
 
-                    out, ec = run_cmd("file %s" % path, simple=False, trace=False)
-                    if ec:
-                        fail_msg = "Failed to run 'file %s': %s" % (path, out)
-                        self.log.warning(fail_msg)
-                        fails.append(fail_msg)
+                    out = get_linked_libs_raw(path)
 
-                    # only run ldd/readelf on dynamically linked executables/libraries
-                    # example output:
-                    # ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked (uses shared libs), ...
-                    # ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped
-                    if "dynamically linked" in out:
+                    if out is None:
+                        msg = "Failed to determine dynamically linked libraries for %s, "
+                        msg += "so skipping it in RPATH sanity check"
+                        self.log.debug(msg, path)
+                    else:
                         # check whether all required libraries are found via 'ldd'
-                        out, ec = run_cmd("ldd %s" % path, simple=False, trace=False)
-                        if ec:
-                            fail_msg = "Failed to run 'ldd %s': %s" % (path, out)
-                            self.log.warning(fail_msg)
-                            fails.append(fail_msg)
-                        elif not_found_regex.search(out):
+                        if not_found_regex.search(out):
                             fail_msg = "One or more required libraries not found for %s: %s" % (path, out)
                             self.log.warning(fail_msg)
                             fails.append(fail_msg)
@@ -2967,9 +3018,6 @@ class EasyBlock(object):
                             fails.append(fail_msg)
                         else:
                             self.log.debug("Output of 'readelf -d %s' checked, looks OK", path)
-
-                    else:
-                        self.log.debug("%s is not dynamically linked, so skipping it in RPATH sanity check", path)
             else:
                 self.log.debug("Not sanity checking files in non-existing directory %s", dirpath)
 
@@ -3244,7 +3292,7 @@ class EasyBlock(object):
         if self.toolchain.use_rpath:
             self.sanity_check_rpath()
         else:
-            self.log.debug("Skiping RPATH sanity check")
+            self.log.debug("Skipping RPATH sanity check")
 
     def _sanity_check_step_extensions(self):
         """Sanity check on extensions (if any)."""
@@ -3410,7 +3458,7 @@ class EasyBlock(object):
                 self.log.warning("RPATH sanity check failed!")
                 self.sanity_check_fail_msgs.extend(rpath_fails)
         else:
-            self.log.debug("Skiping RPATH sanity check")
+            self.log.debug("Skipping RPATH sanity check")
 
         # pass or fail
         if self.sanity_check_fail_msgs:

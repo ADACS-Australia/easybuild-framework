@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # #
-# Copyright 2009-2021 Ghent University
+# Copyright 2009-2022 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -236,6 +236,11 @@ def main(args=None, logfile=None, do_build=None, testing=False, modtool=None):
     if 'CDPATH' in os.environ:
         del os.environ['CDPATH']
 
+    # When EB is run via `exec` the special bash variable $_ is not set
+    # So emulate this here to allow (module) scripts depending on that to work
+    if '_' not in os.environ:
+        os.environ['_'] = sys.executable
+
     # purposely session state very early, to avoid modules loaded by EasyBuild meddling in
     init_session_state = session_state()
 
@@ -453,7 +458,7 @@ def main(args=None, logfile=None, do_build=None, testing=False, modtool=None):
     forced = options.force or options.rebuild
     dry_run_mode = options.dry_run or options.dry_run_short or options.missing_modules
 
-    keep_available_modules = forced or dry_run_mode or options.extended_dry_run or pr_options
+    keep_available_modules = forced or dry_run_mode or options.extended_dry_run or pr_options or options.copy_ec
     keep_available_modules = keep_available_modules or options.inject_checksums or options.sanity_check_only
 
     # skip modules that are already installed unless forced, or unless an option is used that warrants not skipping

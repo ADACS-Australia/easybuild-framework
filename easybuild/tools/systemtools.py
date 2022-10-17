@@ -1,5 +1,5 @@
 ##
-# Copyright 2011-2021 Ghent University
+# Copyright 2011-2022 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -41,6 +41,7 @@ import sys
 import termios
 from ctypes.util import find_library
 from socket import gethostname
+from easybuild.tools.py2vs3 import subprocess_popen_text
 
 # pkg_resources is provided by the setuptools Python package,
 # which we really want to keep as an *optional* dependency
@@ -57,7 +58,7 @@ except ImportError:
     pass
 
 from easybuild.base import fancylogger
-from easybuild.tools.build_log import EasyBuildError
+from easybuild.tools.build_log import EasyBuildError, print_warning
 from easybuild.tools.filetools import is_readable, read_file, which
 from easybuild.tools.py2vs3 import OrderedDict, string_type
 from easybuild.tools.run import run_cmd
@@ -89,11 +90,15 @@ X86_64 = 'x86_64'
 RISCV32 = 'RISC-V-32'
 RISCV64 = 'RISC-V-64'
 
+# known values for ARCH constant (determined by _get_arch_constant in easybuild.framework.easyconfig.constants)
+KNOWN_ARCH_CONSTANTS = ('aarch64', 'ppc64le', 'riscv64', 'x86_64')
+
 ARCH_KEY_PREFIX = 'arch='
 
 # Vendor constants
 AMD = 'AMD'
 APM = 'Applied Micro'
+APPLE = 'Apple'
 ARM = 'ARM'
 BROADCOM = 'Broadcom'
 CAVIUM = 'Cavium'
@@ -123,7 +128,7 @@ PROC_MEMINFO_FP = '/proc/meminfo'
 
 CPU_ARCHITECTURES = [AARCH32, AARCH64, POWER, RISCV32, RISCV64, X86_64]
 CPU_FAMILIES = [AMD, ARM, INTEL, POWER, POWER_LE, RISCV]
-CPU_VENDORS = [AMD, APM, ARM, BROADCOM, CAVIUM, DEC, IBM, INTEL, MARVELL, MOTOROLA, NVIDIA, QUALCOMM]
+CPU_VENDORS = [AMD, APM, APPLE, ARM, BROADCOM, CAVIUM, DEC, IBM, INTEL, MARVELL, MOTOROLA, NVIDIA, QUALCOMM]
 # ARM implementer IDs (i.e., the hexadeximal keys) taken from ARMv8-A Architecture Reference Manual
 # (ARM DDI 0487A.j, Section G6.2.102, Page G6-4493)
 VENDOR_IDS = {
@@ -163,6 +168,7 @@ ARM_CORTEX_IDS = {
 # OS package handler name constants
 RPM = 'rpm'
 DPKG = 'dpkg'
+ZYPPER = 'zypper'
 
 SYSTEM_TOOLS = {
     '7z': "extracting sources (.iso)",
@@ -178,6 +184,7 @@ SYSTEM_TOOLS = {
     'tar': "unpacking source files (.tar)",
     'unxz': "decompressing source files (.xz, .txz)",
     'unzip': "decompressing files (.zip)",
+    ZYPPER: "checking OS dependencies (openSUSE)",
 }
 
 SYSTEM_TOOL_CMDS = {
@@ -318,7 +325,7 @@ def get_cpu_architecture():
     :return: a value from the CPU_ARCHITECTURES list
     """
     aarch32_regex = re.compile("arm.*")
-    aarch64_regex = re.compile("aarch64.*")
+    aarch64_regex = re.compile("(aarch64|arm64).*")
     power_regex = re.compile("ppc64.*")
     riscv32_regex = re.compile("riscv32.*")
     riscv64_regex = re.compile("riscv64.*")
@@ -382,11 +389,18 @@ def get_cpu_vendor():
 
     elif os_type == DARWIN:
         cmd = "sysctl -n machdep.cpu.vendor"
-        out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False)
+        out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False, log_ok=False)
         out = out.strip()
         if ec == 0 and out in VENDOR_IDS:
             vendor = VENDOR_IDS[out]
             _log.debug("Determined CPU vendor on DARWIN as being '%s' via cmd '%s" % (vendor, cmd))
+        else:
+            cmd = "sysctl -n machdep.cpu.brand_string"
+            out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False, log_ok=False)
+            out = out.strip().split(' ')[0]
+            if ec == 0 and out in CPU_VENDORS:
+                vendor = out
+                _log.debug("Determined CPU vendor on DARWIN as being '%s' via cmd '%s" % (vendor, cmd))
 
     if vendor is None:
         vendor = UNKNOWN
@@ -531,9 +545,11 @@ def get_cpu_speed():
         cmd = "sysctl -n hw.cpufrequency_max"
         _log.debug("Trying to determine CPU frequency on Darwin via cmd '%s'" % cmd)
         out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False)
-        if ec == 0:
+        out = out.strip()
+        cpu_freq = None
+        if ec == 0 and out:
             # returns clock frequency in cycles/sec, but we want MHz
-            cpu_freq = float(out.strip()) // (1000 ** 2)
+            cpu_freq = float(out) // (1000 ** 2)
 
     else:
         raise SystemToolsException("Could not determine CPU clock frequency (OS: %s)." % os_type)
@@ -576,7 +592,7 @@ def get_cpu_features():
         for feature_set in ['extfeatures', 'features', 'leaf7_features']:
             cmd = "sysctl -n machdep.cpu.%s" % feature_set
             _log.debug("Trying to determine CPU features on Darwin via cmd '%s'", cmd)
-            out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False)
+            out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False, log_ok=False)
             if ec == 0:
                 cpu_feat.extend(out.strip().lower().split())
 
@@ -610,6 +626,30 @@ def get_gpu_info():
         except Exception as err:
             _log.debug("Exception was raised when running nvidia-smi: %s", err)
             _log.info("No NVIDIA GPUs detected")
+
+        try:
+            cmd = "rocm-smi --showdriverversion --csv"
+            _log.debug("Trying to determine AMD GPU driver on Linux via cmd '%s'", cmd)
+            out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False)
+            if ec == 0:
+                amd_driver = out.strip().split('\n')[1].split(',')[1]
+
+            cmd = "rocm-smi --showproductname --csv"
+            _log.debug("Trying to determine AMD GPU info on Linux via cmd '%s'", cmd)
+            out, ec = run_cmd(cmd, force_in_dry_run=True, trace=False, stream_output=False)
+            if ec == 0:
+                for line in out.strip().split('\n')[1:]:
+                    amd_card_series = line.split(',')[1]
+                    amd_card_model = line.split(',')[2]
+                    amd_gpu = "%s (model: %s, driver: %s)" % (amd_card_series, amd_card_model, amd_driver)
+                    amd_gpu_info = gpu_info.setdefault('AMD', {})
+                    amd_gpu_info.setdefault(amd_gpu, 0)
+                    amd_gpu_info[amd_gpu] += 1
+            else:
+                _log.debug("None zero exit (%s) from rocm-smi: %s", ec, out)
+        except Exception as err:
+            _log.debug("Exception was raised when running rocm-smi: %s", err)
+            _log.info("No AMD GPUs detected")
     else:
         _log.info("Only know how to get GPU info on Linux, assuming no GPUs are present")
 
@@ -785,14 +825,17 @@ def check_os_dependency(dep):
     os_to_pkg_cmd_map = {
         'centos': RPM,
         'debian': DPKG,
+        'opensuse': ZYPPER,
         'redhat': RPM,
+        'rhel': RPM,
         'ubuntu': DPKG,
     }
     pkg_cmd_flag = {
         DPKG: '-s',
         RPM: '-q',
+        ZYPPER: 'search -i',
     }
-    os_name = get_os_name()
+    os_name = get_os_name().lower().split(' ')[0]
     if os_name in os_to_pkg_cmd_map:
         pkg_cmds = [os_to_pkg_cmd_map[os_name]]
     else:
@@ -893,6 +936,58 @@ def get_glibc_version():
     return glibc_ver
 
 
+def get_linked_libs_raw(path):
+    """
+    Get raw output from command that reports linked libraries for dynamically linked executables/libraries,
+    or None for other types of files.
+    """
+
+    file_cmd_out, ec = run_cmd("file %s" % path, simple=False, trace=False)
+    if ec:
+        fail_msg = "Failed to run 'file %s': %s" % (path, file_cmd_out)
+        _log.warning(fail_msg)
+
+    os_type = get_os_type()
+
+    # check whether specified path is a dynamically linked binary or a shared library
+    if os_type == LINUX:
+        # example output for dynamically linked binaries:
+        #   /usr/bin/ls: ELF 64-bit LSB executable, x86-64, ..., dynamically linked (uses shared libs), ...
+        # example output for shared libraries:
+        #   /lib64/libc-2.17.so: ELF 64-bit LSB shared object, x86-64, ..., dynamically linked (uses shared libs), ...
+        if "dynamically linked" in file_cmd_out:
+            # determine linked libraries via 'ldd'
+            linked_libs_cmd = "ldd %s" % path
+        else:
+            return None
+
+    elif os_type == DARWIN:
+        # example output for dynamically linked binaries:
+        #   /bin/ls: Mach-O 64-bit executable x86_64
+        # example output for shared libraries:
+        #   /usr/lib/libz.dylib: Mach-O 64-bit dynamically linked shared library x86_64
+        bin_lib_regex = re.compile('(Mach-O .* executable)|(dynamically linked)', re.M)
+        if bin_lib_regex.search(file_cmd_out):
+            linked_libs_cmd = "otool -L %s" % path
+        else:
+            return None
+    else:
+        raise EasyBuildError("Unknown OS type: %s", os_type)
+
+    # take into account that 'ldd' may fail for strange reasons,
+    # like printing 'not a dynamic executable' when not enough memory is available
+    # (see also https://bugzilla.redhat.com/show_bug.cgi?id=1817111)
+    out, ec = run_cmd(linked_libs_cmd, simple=False, trace=False, log_ok=False, log_all=False)
+    if ec == 0:
+        linked_libs_out = out
+    else:
+        fail_msg = "Determining linked libraries for %s via '%s' failed! Output: '%s'" % (path, linked_libs_cmd, out)
+        print_warning(fail_msg)
+        linked_libs_out = None
+
+    return linked_libs_out
+
+
 def check_linked_shared_libs(path, required_patterns=None, banned_patterns=None):
     """
     Check for (lack of) patterns in linked shared libraries for binary/library at specified path.
@@ -917,33 +1012,9 @@ def check_linked_shared_libs(path, required_patterns=None, banned_patterns=None)
     if os.path.islink(path) and os.path.exists(path):
         path = os.path.realpath(path)
 
-    file_cmd_out, _ = run_cmd("file %s" % path, simple=False, trace=False)
-
-    os_type = get_os_type()
-
-    # check whether specified path is a dynamically linked binary or a shared library
-    if os_type == LINUX:
-        # example output for dynamically linked binaries:
-        #   /usr/bin/ls: ELF 64-bit LSB executable, x86-64, ..., dynamically linked (uses shared libs), ...
-        # example output for shared libraries:
-        #   /lib64/libc-2.17.so: ELF 64-bit LSB shared object, x86-64, ..., dynamically linked (uses shared libs), ...
-        if "dynamically linked" in file_cmd_out:
-            linked_libs_out, _ = run_cmd("ldd %s" % path, simple=False, trace=False)
-        else:
-            return None
-
-    elif os_type == DARWIN:
-        # example output for dynamically linked binaries:
-        #   /bin/ls: Mach-O 64-bit executable x86_64
-        # example output for shared libraries:
-        #   /usr/lib/libz.dylib: Mach-O 64-bit dynamically linked shared library x86_64
-        bin_lib_regex = re.compile('(Mach-O .* executable)|(dynamically linked)', re.M)
-        if bin_lib_regex.search(file_cmd_out):
-            linked_libs_out, _ = run_cmd("otool -L %s" % path, simple=False, trace=False)
-        else:
-            return None
-    else:
-        raise EasyBuildError("Unknown OS type: %s", os_type)
+    linked_libs_out = get_linked_libs_raw(path)
+    if linked_libs_out is None:
+        return None
 
     found_banned_patterns = []
     missing_required_patterns = []
@@ -1131,7 +1202,7 @@ def det_terminal_size():
     except Exception as err:
         _log.warning("First attempt to determine terminal size failed: %s", err)
         try:
-            height, width = [int(x) for x in os.popen("stty size").read().strip().split()]
+            height, width = [int(x) for x in subprocess_popen_text("stty size").communicate()[0].strip().split()]
         except Exception as err:
             _log.warning("Second attempt to determine terminal size failed, going to return defaults: %s", err)
             height, width = 25, 80

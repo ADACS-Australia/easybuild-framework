@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2021 Ghent University
+# Copyright 2012-2022 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -1018,9 +1018,13 @@ def is_patch_for(patch_name, ec):
 
     with ec.disable_templating():
         # take into account both list of extensions (via exts_list) and components (cfr. Bundle easyblock)
-        for entry in itertools.chain(ec['exts_list'], ec.get('components', [])):
+        for entry in itertools.chain(ec['exts_list'], ec.get('components') or []):
             if isinstance(entry, (list, tuple)) and len(entry) == 3 and isinstance(entry[2], dict):
-                templates = {'name': entry[0], 'version': entry[1]}
+                templates = {
+                    'name': entry[0],
+                    'namelower': entry[0].lower(),
+                    'version': entry[1],
+                }
                 options = entry[2]
                 patches.extend(p[0] % templates if isinstance(p, (tuple, list)) else p % templates
                                for p in options.get('patches', []))
@@ -1155,12 +1159,14 @@ def check_pr_eligible_to_merge(pr_data):
 
     # check test suite result, Travis must give green light
     msg_tmpl = "* test suite passes: %s"
+    failed_status_last_commit = False
     if pr_data['status_last_commit'] == STATUS_SUCCESS:
         print_msg(msg_tmpl % 'OK', prefix=False)
     elif pr_data['status_last_commit'] == STATUS_PENDING:
         res = not_eligible(msg_tmpl % "pending...")
     else:
         res = not_eligible(msg_tmpl % "(status: %s)" % pr_data['status_last_commit'])
+        failed_status_last_commit = True
 
     if pr_data['base']['repo']['name'] == GITHUB_EASYCONFIGS_REPO:
         # check for successful test report (checked in reverse order)
@@ -1221,13 +1227,19 @@ def check_pr_eligible_to_merge(pr_data):
 
     # check github mergeable state
     msg_tmpl = "* mergeable state is clean: %s"
+    mergeable = False
     if pr_data['merged']:
         print_msg(msg_tmpl % "PR is already merged", prefix=False)
     elif pr_data['mergeable_state'] == GITHUB_MERGEABLE_STATE_CLEAN:
         print_msg(msg_tmpl % "OK", prefix=False)
+        mergeable = True
     else:
         reason = "FAILED (mergeable state is '%s')" % pr_data['mergeable_state']
         res = not_eligible(msg_tmpl % reason)
+
+    if failed_status_last_commit and mergeable:
+        print_msg("\nThis PR is mergeable but the test suite has a failed status. Try syncing the PR with the "
+                  "develop branch using 'eb --sync-pr-with-develop %s'" % pr_data['number'], prefix=False)
 
     return res
 
@@ -1788,6 +1800,15 @@ def new_pr(paths, ecs, title=None, descr=None, commit_msg=None):
             for patch in ec.asdict()['patches']:
                 if isinstance(patch, tuple):
                     patch = patch[0]
+                elif isinstance(patch, dict):
+                    patch_info = {}
+                    for key in patch.keys():
+                        patch_info[key] = patch[key]
+                    if 'name' not in patch_info.keys():
+                        raise EasyBuildError("Wrong patch spec '%s', when using a dict 'name' entry must be supplied",
+                                             str(patch))
+                    patch = patch_info['name']
+
                 if patch not in paths['patch_files'] and not os.path.isfile(os.path.join(os.path.dirname(ec_path),
                                                                             patch)):
                     print_warning("new patch file %s, referenced by %s, is not included in this PR" %

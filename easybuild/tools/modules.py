@@ -1,5 +1,5 @@
 ##
-# Copyright 2009-2021 Ghent University
+# Copyright 2009-2022 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -462,7 +462,7 @@ class ModulesTool(object):
         else:
             # filter out tail of paths that already matches tail of target, to avoid unnecessary 'unuse' commands
             idx = 1
-            while(curr_mod_paths[-idx:] == self.mod_paths[-idx:]):
+            while curr_mod_paths[-idx:] == self.mod_paths[-idx:]:
                 idx += 1
             self.log.debug("Not prepending %d last entries of %s", idx - 1, self.mod_paths)
 

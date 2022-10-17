@@ -1,5 +1,5 @@
 ##
-# Copyright 2012-2021 Ghent University
+# Copyright 2012-2022 Ghent University
 #
 # This file is part of EasyBuild,
 # originally created by the HPC team of Ghent University (http://ugent.be/hpc/en),
@@ -43,6 +43,7 @@ import easybuild.tools.modules as modules
 import easybuild.tools.toolchain as toolchain
 import easybuild.tools.toolchain.compiler
 from easybuild.framework.easyconfig.easyconfig import EasyConfig, ActiveMNS
+from easybuild.toolchains.compiler.gcc import Gcc
 from easybuild.toolchains.system import SystemToolchain
 from easybuild.tools import systemtools as st
 from easybuild.tools.build_log import EasyBuildError
@@ -407,8 +408,10 @@ class ToolchainTest(EnhancedTestCase):
         self.assertEqual(os.getenv('OMPI_F77'), 'gfortran')
         self.assertEqual(os.getenv('OMPI_FC'), 'gfortran')
 
+        flags_regex = re.compile(r"-O2 -ftree-vectorize -m(arch|cpu)=native -fno-math-errno")
         for key in ['CFLAGS', 'CXXFLAGS', 'F90FLAGS', 'FCFLAGS', 'FFLAGS']:
-            self.assertEqual(os.getenv(key), "-O2 -ftree-vectorize -march=native -fno-math-errno")
+            val = os.getenv(key)
+            self.assertTrue(flags_regex.match(val), "'%s' should match pattern '%s'" % (val, flags_regex.pattern))
 
     def test_get_variable_compilers(self):
         """Test get_variable function to obtain compiler variables."""
@@ -705,12 +708,16 @@ class ToolchainTest(EnhancedTestCase):
             tcs = {
                 'gompi': ('2018a', "-march=x86-64 -mtune=generic"),
                 'iccifort': ('2018.1.163', "-xSSE2 -ftz -fp-speculation=safe -fp-model source"),
+                'intel-compilers': ('2021.4.0', "-xSSE2 -fp-speculation=safe -fp-model precise"),
             }
             for tcopt_optarch in [False, True]:
                 for tcname in tcs:
                     tcversion, generic_flags = tcs[tcname]
                     tc = self.get_toolchain(tcname, version=tcversion)
-                    tc.set_options({'optarch': tcopt_optarch})
+                    if tcname == 'intel-compilers':
+                        tc.set_options({'optarch': tcopt_optarch, 'oneapi': True})
+                    else:
+                        tc.set_options({'optarch': tcopt_optarch})
                     tc.prepare()
                     for var in flag_vars:
                         if generic:
@@ -882,17 +889,17 @@ class ToolchainTest(EnhancedTestCase):
         tc = self.get_toolchain('foss', version='2018a')
         tc.set_options({})
         tc.prepare()
+        flags_regex = re.compile(r"-O2 -ftree-vectorize -m(arch|cpu)=native -fno-math-errno")
         for var in flag_vars:
-            self.assertEqual(os.getenv(var), "-O2 -ftree-vectorize -march=native -fno-math-errno")
+            val = os.getenv(var)
+            self.assertTrue(flags_regex.match(val), "'%s' should match pattern '%s'" % (val, flags_regex.pattern))
 
         # check other precision flags
-        prec_flags = {
-            'ieee': "-fno-math-errno -mieee-fp -fno-trapping-math",
-            'strict': "-mieee-fp -mno-recip",
-            'precise': "-mno-recip",
-            'loose': "-fno-math-errno -mrecip -mno-ieee-fp",
-            'veryloose': "-fno-math-errno -mrecip=all -mno-ieee-fp",
-        }
+        precs = ['strict', 'precise', 'loose', 'veryloose']
+        prec_flags = {}
+        for prec in precs:
+            prec_flags[prec] = ' '.join('-%s' % x for x in Gcc.COMPILER_UNIQUE_OPTION_MAP[prec])
+
         for prec in prec_flags:
             for enable in [True, False]:
                 tc = self.get_toolchain('foss', version='2018a')
@@ -900,9 +907,12 @@ class ToolchainTest(EnhancedTestCase):
                 tc.prepare()
                 for var in flag_vars:
                     if enable:
-                        self.assertEqual(os.getenv(var), "-O2 -ftree-vectorize -march=native %s" % prec_flags[prec])
+                        regex = re.compile(r"-O2 -ftree-vectorize -m(arch|cpu)=native %s" % prec_flags[prec])
                     else:
-                        self.assertEqual(os.getenv(var), "-O2 -ftree-vectorize -march=native -fno-math-errno")
+                        regex = flags_regex
+                    val = os.getenv(var)
+                    self.assertTrue(regex.match(val), "%s: '%s' should match pattern '%s'" % (prec, val, regex.pattern))
+
                 self.modtool.purge()
 
     def test_cgoolf_toolchain(self):
@@ -1017,6 +1027,60 @@ class ToolchainTest(EnhancedTestCase):
         self.assertEqual(tc.get_variable('LIBFFT'), '-lfftw3_mpi -lfftw3')
         self.assertEqual(tc.get_variable('LIBFFT_MT'), '-lfftw3 -lpthread')
 
+        self.modtool.purge()
+        self.setup_sandbox_for_foss_fftw(self.test_prefix)
+        self.modtool.prepend_module_path(self.test_prefix)
+
+        tc = self.get_toolchain('foss', version='2018a-FFTW.MPI')
+        tc.prepare()
+
+        fft_static_libs = 'libfftw3.a'
+        self.assertEqual(tc.get_variable('FFT_STATIC_LIBS'), fft_static_libs)
+        self.assertEqual(tc.get_variable('FFTW_STATIC_LIBS'), fft_static_libs)
+
+        fft_static_libs_mt = 'libfftw3.a,libpthread.a'
+        self.assertEqual(tc.get_variable('FFT_STATIC_LIBS_MT'), fft_static_libs_mt)
+        self.assertEqual(tc.get_variable('FFTW_STATIC_LIBS_MT'), fft_static_libs_mt)
+
+        self.assertEqual(tc.get_variable('LIBFFT'), '-lfftw3')
+        self.assertEqual(tc.get_variable('LIBFFT_MT'), '-lfftw3 -lpthread')
+
+        fft_lib_dir = os.path.join(modules.get_software_root('FFTW'), 'lib')
+        self.assertEqual(tc.get_variable('FFT_LIB_DIR'), fft_lib_dir)
+
+        tc = self.get_toolchain('foss', version='2018a-FFTW.MPI')
+        tc.set_options({'openmp': True})
+        tc.prepare()
+
+        self.assertEqual(tc.get_variable('FFT_STATIC_LIBS'), fft_static_libs)
+        self.assertEqual(tc.get_variable('FFTW_STATIC_LIBS'), fft_static_libs)
+
+        self.assertEqual(tc.get_variable('FFT_STATIC_LIBS_MT'), 'libfftw3_omp.a,' + fft_static_libs_mt)
+        self.assertEqual(tc.get_variable('FFTW_STATIC_LIBS_MT'), 'libfftw3_omp.a,' + fft_static_libs_mt)
+
+        self.assertEqual(tc.get_variable('LIBFFT'), '-lfftw3')
+        self.assertEqual(tc.get_variable('LIBFFT_MT'), '-lfftw3_omp -lfftw3 -lpthread')
+
+        fft_lib_dir = os.path.join(modules.get_software_root('FFTW'), 'lib')
+        self.assertEqual(tc.get_variable('FFT_LIB_DIR'), fft_lib_dir)
+
+        tc = self.get_toolchain('foss', version='2018a-FFTW.MPI')
+        tc.set_options({'usempi': True})
+        tc.prepare()
+
+        fft_static_libs = 'libfftw3_mpi.a,libfftw3.a'
+        self.assertEqual(tc.get_variable('FFT_STATIC_LIBS'), fft_static_libs)
+        self.assertEqual(tc.get_variable('FFTW_STATIC_LIBS'), fft_static_libs)
+
+        self.assertEqual(tc.get_variable('FFT_STATIC_LIBS_MT'), fft_static_libs_mt)
+        self.assertEqual(tc.get_variable('FFTW_STATIC_LIBS_MT'), fft_static_libs_mt)
+
+        self.assertEqual(tc.get_variable('LIBFFT'), '-lfftw3_mpi -lfftw3')
+        self.assertEqual(tc.get_variable('LIBFFT_MT'), '-lfftw3 -lpthread')
+
+        fft_lib_dir = os.path.join(modules.get_software_root('FFTW.MPI'), 'lib')
+        self.assertEqual(tc.get_variable('FFT_LIB_DIR'), fft_lib_dir)
+
     def test_fft_env_vars_intel(self):
         """Test setting of $FFT* environment variables using intel toolchain."""
 
@@ -1115,6 +1179,9 @@ class ToolchainTest(EnhancedTestCase):
         self.assertEqual(tc.get_variable('LIBFFT'), libfft)
         self.assertEqual(tc.get_variable('LIBFFT_MT'), libfft_mt)
 
+        fft_lib_dir = os.path.join(modules.get_software_root('imkl'), 'mkl/2021.4.0/lib/intel64')
+        self.assertEqual(tc.get_variable('FFT_LIB_DIR'), fft_lib_dir)
+
         tc = self.get_toolchain('intel', version='2021b')
         tc.set_options({'usempi': True})
         tc.prepare()
@@ -1137,6 +1204,9 @@ class ToolchainTest(EnhancedTestCase):
         libfft_mt += '-lmkl_blacs_intelmpi_lp64 -lmkl_intel_lp64 -lmkl_intel_thread -lmkl_core -Wl,--end-group '
         libfft_mt += '-Wl,-Bdynamic -liomp5 -lpthread'
         self.assertEqual(tc.get_variable('LIBFFT_MT'), libfft_mt)
+
+        fft_lib_dir = os.path.join(modules.get_software_root('imkl-FFTW'), 'lib')
+        self.assertEqual(tc.get_variable('FFT_LIB_DIR'), fft_lib_dir)
 
     def test_fosscuda(self):
         """Test whether fosscuda is handled properly."""
@@ -1168,6 +1238,33 @@ class ToolchainTest(EnhancedTestCase):
         # check CUDA runtime lib
         self.assertTrue("-lrt -lcudart" in tc.get_variable('LIBS'))
 
+    def setup_sandbox_for_foss_fftw(self, moddir, fftwver='3.3.7'):
+        """Set up sandbox for foss FFTW and FFTW.MPI"""
+        # hack to make foss FFTW lib check pass
+        # create dummy FFTW and FFTW.MPI modules
+
+        fftw_module_path = os.path.join(moddir, 'FFTW', fftwver)
+        fftw_dir = os.path.join(self.test_prefix, 'software', 'FFTW', fftwver)
+
+        fftw_mod_txt = '\n'.join([
+            "#%Module",
+            "setenv EBROOTFFTW %s" % fftw_dir,
+            "setenv EBVERSIONFFTW %s" % fftwver,
+        ])
+        write_file(fftw_module_path, fftw_mod_txt)
+
+        fftw_mpi_module_path = os.path.join(moddir, 'FFTW.MPI', fftwver)
+        fftw_mpi_dir = os.path.join(self.test_prefix, 'software', 'FFTW.MPI', fftwver)
+        fftw_mpi_mod_txt = '\n'.join([
+            "#%Module",
+            "setenv EBROOTFFTWMPI %s" % fftw_mpi_dir,
+            "setenv EBVERSIONFFTWMPI %s" % fftwver,
+        ])
+        write_file(fftw_mpi_module_path, fftw_mpi_mod_txt)
+
+        os.makedirs(os.path.join(fftw_dir, 'lib'))
+        os.makedirs(os.path.join(fftw_mpi_dir, 'lib'))
+
     def setup_sandbox_for_intel_fftw(self, moddir, imklver='2018.1.163'):
         """Set up sandbox for Intel FFTW"""
         # hack to make Intel FFTW lib check pass
@@ -1185,6 +1282,7 @@ class ToolchainTest(EnhancedTestCase):
 
         mkl_libs = ['mkl_cdft_core', 'mkl_blacs_intelmpi_lp64']
         mkl_libs += ['mkl_intel_lp64', 'mkl_sequential', 'mkl_core', 'mkl_intel_ilp64']
+        mkl_libs += ['mkl_intel_thread', 'mkl_pgi_thread']
         fftw_libs = ['fftw3xc_intel', 'fftw3xc_pgi']
         if LooseVersion(imklver) >= LooseVersion('11'):
             fftw_libs.extend(['fftw3x_cdft_ilp64', 'fftw3x_cdft_lp64'])
@@ -1283,6 +1381,67 @@ class ToolchainTest(EnhancedTestCase):
         self.assertEqual(tc.get_variable('MPIFC'), 'mpiifort')
         for var in ['CFLAGS', 'CXXFLAGS', 'FCFLAGS', 'FFLAGS', 'F90FLAGS']:
             self.assertTrue('-openmp' in tc.get_variable(var))
+
+        # with compiler-only toolchain the $MPI* variables are not defined
+        mpi_vars = ('MPICC', 'MPICXX', 'MPIF77', 'MPIF90', 'MPIFC')
+
+        # make sure environment variables are undefined before preparing build environment
+        for var in mpi_vars:
+            if os.getenv(var):
+                del os.environ[var]
+
+        tc = self.get_toolchain('intel-compilers', version='2021.4.0')
+        tc.set_options({})
+        tc.prepare()
+
+        self.assertEqual(os.getenv('CC'), 'icc')
+        self.assertEqual(os.getenv('CXX'), 'icpc')
+        self.assertEqual(os.getenv('F77'), 'ifort')
+        self.assertEqual(os.getenv('F90'), 'ifort')
+        self.assertEqual(os.getenv('FC'), 'ifort')
+
+        for var in mpi_vars:
+            self.assertEqual(os.getenv(var), None)
+
+    def test_intel_toolchain_oneapi(self):
+        """Test for opt-in to oneAPI with intel toolchain"""
+
+        # for recent versions of intel toolchain, we can opt in to using the new oneAPI compilers
+        self.setup_sandbox_for_intel_fftw(self.test_prefix, imklver='2021.4.0')
+        self.modtool.prepend_module_path(self.test_prefix)
+        tc = self.get_toolchain('intel', version='2021b')
+        tc.set_options({})
+        tc.prepare()
+
+        # default remains classic compilers for now
+        self.assertEqual(os.getenv('CC'), 'icc')
+        self.assertEqual(os.getenv('CXX'), 'icpc')
+        self.assertEqual(os.getenv('F77'), 'ifort')
+        self.assertEqual(os.getenv('F90'), 'ifort')
+        self.assertEqual(os.getenv('FC'), 'ifort')
+
+        self.assertEqual(os.getenv('MPICC'), 'mpiicc')
+        self.assertEqual(os.getenv('MPICXX'), 'mpiicpc')
+        self.assertEqual(os.getenv('MPIF77'), 'mpiifort')
+        self.assertEqual(os.getenv('MPIF90'), 'mpiifort')
+        self.assertEqual(os.getenv('MPIFC'), 'mpiifort')
+
+        self.modtool.purge()
+        tc = self.get_toolchain('intel', version='2021b')
+        tc.set_options({'oneapi': True})
+        tc.prepare()
+
+        self.assertEqual(os.getenv('CC'), 'icx')
+        self.assertEqual(os.getenv('CXX'), 'icpx')
+        self.assertEqual(os.getenv('F77'), 'ifx')
+        self.assertEqual(os.getenv('F90'), 'ifx')
+        self.assertEqual(os.getenv('FC'), 'ifx')
+
+        self.assertEqual(os.getenv('MPICC'), 'mpiicc')
+        self.assertEqual(os.getenv('MPICXX'), 'mpiicpc')
+        self.assertEqual(os.getenv('MPIF77'), 'mpiifort')
+        self.assertEqual(os.getenv('MPIF90'), 'mpiifort')
+        self.assertEqual(os.getenv('MPIFC'), 'mpiifort')
 
     def test_toolchain_verification(self):
         """Test verification of toolchain definition."""
@@ -1791,6 +1950,7 @@ class ToolchainTest(EnhancedTestCase):
             'CrayIntel': "-O2 -ftz -fp-speculation=safe -fp-model source -fopenmp -craype-verbose",
             'GCC': "-O2 -ftree-vectorize -test -fno-math-errno -fopenmp",
             'iccifort': "-O2 -test -ftz -fp-speculation=safe -fp-model source -fopenmp",
+            'intel-compilers': "-O2 -test -ftz -fp-speculation=safe -fp-model precise -fiopenmp",
         }
 
         toolchains = [
@@ -1799,6 +1959,7 @@ class ToolchainTest(EnhancedTestCase):
             ('CrayIntel', '2015.06-XC'),
             ('GCC', '6.4.0-2.28'),
             ('iccifort', '2018.1.163'),
+            ('intel-compilers', '2022.1.0'),
         ]
 
         # purposely obtain toolchains several times in a row, value for $CFLAGS should not change
@@ -1807,7 +1968,11 @@ class ToolchainTest(EnhancedTestCase):
                 tc = get_toolchain({'name': tcname, 'version': tcversion}, {},
                                    mns=ActiveMNS(), modtool=self.modtool)
                 # also check whether correct compiler flag for OpenMP is used while we're at it
-                tc.set_options({'openmp': True})
+                # and options for oneAPI compiler for Intel
+                if tcname == 'intel-compilers':
+                    tc.set_options({'oneapi': True, 'openmp': True})
+                else:
+                    tc.set_options({'openmp': True})
                 tc.prepare()
                 expected_cflags = tc_cflags[tcname]
                 msg = "Expected $CFLAGS found for toolchain %s: %s" % (tcname, expected_cflags)
